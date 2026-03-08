@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="EmberOS-Windows" Language="1033" Version="1.0.0.0"
+           Manufacturer="EmberOS" UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine"
+             Description="EmberOS-Windows AI Agent" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of EmberOS is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLFOLDER" Name="EmberOS">
+          <Directory Id="DIR_emberos" Name="emberos" />
+          <Directory Id="DIR_config" Name="config" />
+          <Directory Id="DIR_assets" Name="assets" />
+          <Directory Id="DIR_scripts" Name="scripts" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="AppMenuFolder" Name="EmberOS" />
+      </Directory>
+    </Directory>
+
+    <ComponentGroup Id="CoreFiles" Directory="INSTALLFOLDER">
+      <Component Id="SetupScript" Guid="B2C3D4E5-F6A7-8901-BCDE-F23456789012">
+        <File Id="setup_ps1" Source="..\..\setup.ps1" Name="setup.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="LaunchScript" Guid="C3D4E5F6-A7B8-9012-CDEF-345678901234">
+        <File Id="launch_ps1" Source="..\..\launch.ps1" Name="launch.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="EmberBat" Guid="D4E5F6A7-B8C9-0123-DEFA-456789012345">
+        <File Id="emberos_bat" Source="..\..\emberos.bat" Name="emberos.bat" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="StartMenuShortcuts" Directory="AppMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="E5F6A7B8-C9D0-1234-EFAB-567890123456">
+        <Shortcut Id="LaunchShortcut" Name="EmberOS Launch"
+                  Target="[SystemFolder]WindowsPowerShell\v1.0\powershell.exe"
+                  Arguments="-ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]launch.ps1&quot;"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\EmberOS" Name="Installed"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="MainFeature" Title="EmberOS-Windows" Level="1">
+      <ComponentGroupRef Id="CoreFiles" />
+      <ComponentGroupRef Id="StartMenuShortcuts" />
+    </Feature>
+  </Product>
+</Wix>
