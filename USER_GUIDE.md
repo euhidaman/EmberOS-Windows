@@ -1,382 +1,133 @@
 # EmberOS User Guide (Windows Edition)
 
-Version 1.0.0  
-A Local Agentic Intelligence Layer for your Operating System
+> **Version 1.0.0**  
+> *A Local Agentic Intelligence Layer for your Operating System*
 
 ---
 
-## What Is EmberOS?
+## 🧭 What Is EmberOS?
 
-EmberOS is a local AI desktop assistant for Windows that runs on your machine.
-
-It helps you control your computer, manage files, run commands, and automate tasks using natural language.
-
-Unlike cloud assistants, EmberOS is designed for local-first operation.
+EmberOS is a local AI desktop assistant for Windows that operates entirely on your physical machine. It intelligently parses your requests to help you natively control your system, manage files, start commands, and automate arbitrary tasks using simple, pure natural language. By avoiding the cloud entirely, EmberOS establishes a hyper-local operation philosophy built for privacy.
 
 ---
 
-## Core Philosophy
+## 🏛️ Core Philosophy
 
-### Privacy First
+### 🔒 Privacy First
+- **Local-first computation**: No reliance on third-party servers.  
+- **No mandatory cloud dependency**: Full offline operability for core integrations.  
+- **Zero telemetry**: Your personal usage data legitimately stays completely managed under your control.
 
-- Local-first processing
-- No mandatory cloud dependency for core workflows
-- Your data stays under your control
+### ⚡ Efficient Local Intelligence
+EmberOS relies on heavily quantized open-weight inference runners allowing it to effortlessly operate on accessible consumer-grade hardware whilst maintaining practical processing throughput speeds.
 
----
-
-### Efficient Local Intelligence
-
-EmberOS is built to run effectively on standard hardware while still delivering practical assistant capabilities for daily desktop tasks.
-
----
-
-### Action-Oriented Assistant
-
-EmberOS is not just a chatbot.
-
-It can:
-
-- manipulate files
-- launch applications
-- execute system commands
-- automate repetitive workflows
+### 🛠️ Action-Oriented Assistant
+EmberOS goes definitively beyond pure chatbots. It is structured intrinsically to:
+- Manipulate bulk file paths locally.
+- Launch installed execution packages.
+- Query underlying Windows system diagnostics naturally.
+- Organize extensive data streams effortlessly.
 
 ---
 
-## System Architecture (Windows)
+## ⚙️ System Architecture
 
-EmberOS is designed for Windows-native operation:
+EmberOS maps perfectly to foundational Windows services:
+- **Windows Service**: A highly structured background process listening securely to system interactions.
+- **Local IPC/API**: Socket routing for lightweight component communication.
+- **PowerShell Pipelines**: Embedded wrapper commands for native execution safety.
 
-- Windows Service for background execution
-- Local IPC/API for component communication
-- PowerShell and Windows-native tooling for system actions
-- Windows-friendly storage layout
-
----
-
-## EmberOS Components
-
-### 1) EmberOS Service
-
-Background service layer.
-
-Responsible for:
-
-- language understanding
-- tool execution
-- file system operations
-- memory and context management
-
-Service name:
-
-EmberOSAgent
+### Main Components
+1. **EmberOS Service** (EmberOSAgent): The backbone background dispatcher interpreting commands, mapping execution toolchains, and handling your contextual continuity/memory structures.
+2. **EmberOS GUI**: Desktop graphical frontend interface designed purely for interactive workflows (.\emberos.bat gui).
+3. **EmberOS CLI**: Extensive rich-text REPL utility built explicitly for shell interactivity (.\emberos.bat repl).
 
 ---
 
-### 2) EmberOS GUI
+## 📁 Installation & Storage Map
 
-Desktop interface for interactive usage.
+To guarantee portable accessibility, all local dependencies securely reside under standard structures:
 
-Launch command:
-
-.\emberos.bat gui
-
----
-
-### 3) EmberOS CLI
-
-Terminal interface for PowerShell or Command Prompt.
-
-Launch command:
-
-.\emberos.bat repl
+| Directory | Core Purpose                                            |
+| --------- | --------------------------------------------------------|
+| config\ | Core system configurations and telemetry definitions    |
+| data\   | Vector memory stores containing localized system facts  |
+| data\backups\ | Rollback snapshots preserved prior to executions  |
+| logs\   | Internal tracking outputs to gauge diagnostic failures  |
 
 ---
 
-## Storage Locations (Default Portable Setup)
+## 🕹️ Primary Workflows
 
-Configuration:
+### Starting Operations
+* **Start Graphical Interface:** .\emberos.bat gui
+* **Start Terminal REPL:** .\emberos.bat repl
+* **Startup Background Process:** .\launch.ps1
 
-config\
-
-Local data:
-
-data\
-
-Snapshots:
-
-data\backups\
-
-Logs:
-
-logs\
+### Running the Daemon Safely
+Whenever direct checks are needed on current stability, check natively in PowerShell:
+* **Verify System Health:** Get-Service EmberOSAgent
+* **Launch Dead Engine:** Start-Service EmberOSAgent
+* **Halt Operating Engine:** Stop-Service EmberOSAgent
+* **Reboot Runtime System:** Restart-Service EmberOSAgent
 
 ---
 
-## Starting EmberOS
+## 🪄 Feature Capabilities
 
-### Start GUI
+### 📂 Dynamic File Management
+**"Find all PDFs within my Downloads folder."*  
+**"Migrate all photos from Downloads securely into Pictures."*  
+**"Initialize a blank development space under Documents mapped to Node.js."*
 
-.\emberos.bat gui
+### 🧠 Deep Note Memory 
+* **User**: *"Remember that my local SQL server password defaults to 'root'."*
+* **EmberOS**: *"Saved persistently."*
+* **User (Months later)**: *"What is my SQL database password again?"*
 
-### Start CLI REPL
+### 💾 Local Application Handling
+**"Launch a secure browser instance pointing to GitHub."*  
+**"Turn on Spotify."*
 
-.\emberos.bat repl
+### 💻 System Information Discovery
+**"What does my absolute CPU configuration load look like recently?"*  
+**"Determine total active RAM usage consumed by Google Chrome."*
 
-### Start Full Background Mode (Service + Tray)
-
-.\launch.ps1
-
----
-
-## Checking Service Status
-
-Open PowerShell:
-
-Get-Service EmberOSAgent
-
-Start service:
-
-Start-Service EmberOSAgent
-
-Stop service:
-
-Stop-Service EmberOSAgent
-
-Restart service:
-
-Restart-Service EmberOSAgent
+### 📂 Complex Multi-Step Tasks
+**User**: *"Please organize the miscellaneous files scattered in my Downloads folder by extensions natively."*  
+**EmberOS**: *"Detected formats spanning (.pdf, .jpg, .exe, .rar). Prepare to execute local mapping moves?"*  
+**User**: *"Yes."*
 
 ---
 
-## File Management
+## 🛡️ Protections: Snapshots & Rollbacks
 
-EmberOS can manipulate files across the Windows filesystem.
+### Predictive Preservation 
+Operating against underlying drives natively introduces risk. EmberOS negates issues comprehensively by issuing background context-snapshots directly mapped to data\backups\ before **any** destructive file action occurs iteratively.
 
-### Example Requests
-
-Find all PDFs in my Downloads folder
-
-Create a folder called Projects in Documents
-
-Move all images from Downloads to Pictures
-
-What is inside notes.txt?
+**Mistake a procedure? Simple reversal:**
+* **User**: "Actually undo that last move entirely."
+* **EmberOS**: "Rollback protocol initiated. Restoring 5 file mappings entirely."
 
 ---
 
-## Notes and Memory
-
-EmberOS includes a local note memory system for saving and recalling important information.
-
-### Example
-
-User:
-
-Remember that the WiFi password is GuestNetwork2024
-
-EmberOS:
-
-Note saved.
-
-Later:
-
-What is the WiFi password?
+## 🖥️ Interactive CLI Tools
+If electing to use the REPL interface, several explicit directives stand ready:
+* :help — Expands complete command listings.
+* :status — Renders immediate model states, GPU routing metrics, and local memory footprints instantly.
+* :clear — Flushes visible terminal history safely.
+* :theme — Flips current ANSI graphical variables predictably.
+* :rollback — Reverts the last recognized dangerous file execution command.
+* :exit / :quit — Kills current foreground pipeline safely.
 
 ---
 
-## System Information
+## 🧰 Troubleshooting Basics
 
-EmberOS can query Windows system information using native tools.
+**UI Not Progressing Correctly?**
+If graphical assets refuse to render cleanly, fall back temporarily via .\emberos.bat gui.
 
-### Example Requests
-
-How much disk space do I have left?
-
-Show CPU usage
-
-Show running Python processes
-
-What is my system uptime?
+**Performance or Model Drag Experiencing Bottlenecks?**  
+Possible culprits include extended persistent conversations stacking token context lengths heavily. Utilize basic terminal resets or execute Restart-Service EmberOSAgent broadly effectively.
 
 ---
-
-## Application Launching
-
-EmberOS can start installed applications by searching common Windows locations.
-
-### Example Requests
-
-Open Chrome
-
-Launch Spotify
-
-Open Notepad
-
----
-
-## Snapshots and Rollback
-
-Before destructive operations, EmberOS creates a snapshot.
-
-Snapshots can include:
-
-- original files
-- metadata
-- timestamps
-
-Typical snapshot location:
-
-data\backups\
-
-### Example
-
-User:
-
-Delete all .tmp files
-
-System:
-
-Snapshot created  
-Files deleted
-
-Then rollback can restore affected files.
-
----
-
-## CLI / REPL Commands
-
-:help
-
-Show help.
-
-:status
-
-Show service and runtime status.
-
-:clear
-
-Clear terminal.
-
-:exit
-
-Exit EmberOS.
-
-:theme
-
-Toggle theme in supported interfaces.
-
-:rollback
-
-Rollback the last destructive file operation.
-
-:snapshots
-
-List recent snapshots.
-
----
-
-## Safety Features
-
-To protect your system, EmberOS asks for confirmation before high-impact actions such as:
-
-- file deletion
-- overwrites
-- system-level commands
-- bulk operations
-
----
-
-## Example Workflow: Organize Downloads
-
-User:
-
-Organize my Downloads folder by file type
-
-EmberOS:
-
-Detected categories:
-
-- PDFs
-- Images
-- Documents
-- Videos
-- Archives
-
-Create folders and move files?
-
-User:
-
-yes
-
-EmberOS executes the operation.
-
----
-
-## Troubleshooting
-
-### EmberOS not running
-
-Get-Service EmberOSAgent
-
-If stopped:
-
-Start-Service EmberOSAgent
-
-### UI not opening
-
-Start from terminal:
-
-.\emberos.bat gui
-
-### Service needs restart
-
-Restart-Service EmberOSAgent
-
-### Performance issues
-
-Possible causes:
-
-- heavy CPU load
-- very large conversation history
-
-Try:
-
-- restarting EmberOS
-- clearing active conversation history
-- closing heavy background applications
-
----
-
-## What Makes EmberOS Unique
-
-- private, local-first assistant experience
-- practical, action-oriented desktop automation
-- deep Windows integration for real task completion
-
----
-
-## Quick Start
-
-1) Launch EmberOS
-
-.\emberos.bat gui
-
-2) Type a request
-
-Find my budget spreadsheet
-
-3) Review response
-
-4) Confirm high-impact actions
-
-5) Continue the conversation
-
----
-
-## EmberOS
-
-A Local Agentic Intelligence Layer for your Operating System
-
-Private • Local • Efficient
