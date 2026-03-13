@@ -270,15 +270,9 @@ def _print_banner(console, connected: bool, status_data: dict):
     # Status line
     if connected:
         model   = status_data.get("model", "local")
-        runtime = status_data.get("runtime_server", "?")
-        gpu     = status_data.get("gpu_mode", "cpu")
-        mem     = status_data.get("memory_entries", 0)
         dot     = f"[{EMBER_SUCCESS}]●[/{EMBER_SUCCESS}]"
         info    = (f"  {dot} [{EMBER_SUCCESS}]Connected[/{EMBER_SUCCESS}]"
-                   f"  [{EMBER_DIM}]Model:[/{EMBER_DIM}] {model}"
-                   f"  [{EMBER_DIM}]Runtime:[/{EMBER_DIM}] {runtime}"
-                   f"  [{EMBER_DIM}]GPU:[/{EMBER_DIM}] {gpu}"
-                   f"  [{EMBER_DIM}]Memory:[/{EMBER_DIM}] {mem} entries")
+                   f"  [{EMBER_DIM}]Model:[/{EMBER_DIM}] {model}")
     else:
         dot  = f"[{EMBER_ERROR}]●[/{EMBER_ERROR}]"
         info = (f"  {dot} [{EMBER_ERROR}]Offline[/{EMBER_ERROR}]"
