@@ -1,5 +1,6 @@
 """System query functions for EmberOS-Windows."""
 
+import ctypes
 import logging
 import subprocess
 from datetime import datetime, timezone
@@ -122,3 +123,275 @@ def check_cpu_temperature() -> str:
         pass
     return ("CPU temperature monitoring is not available on this system. "
             "Use HWMonitor or HWiNFO for temperature readings.")
+
+
+def get_battery_status() -> str:
+    battery = psutil.sensors_battery()
+    if battery is None:
+        return "No battery detected — this system is likely a desktop."
+    percent = battery.percent
+    plugged = battery.power_plugged
+    if plugged:
+        status = "Plugged in, charging" if percent < 100 else "Plugged in, fully charged"
+    else:
+        secs = battery.secsleft
+        if secs == psutil.POWER_TIME_UNLIMITED or secs < 0:
+            remain = ""
+        else:
+            h, m = divmod(secs // 60, 60)
+            remain = f" (~{h}h {m}m remaining)"
+        status = f"On battery{remain}"
+    return f"Battery: {percent:.0f}% — {status}"
+
+
+def lock_screen() -> str:
+    try:
+        ctypes.windll.user32.LockWorkStation()
+        return "Screen locked."
+    except Exception as e:
+        return f"Could not lock screen: {e}"
+
+
+def sleep_system() -> str:
+    try:
+        subprocess.Popen(
+            ["rundll32.exe", "powrprof.dll,SetSuspendState", "0", "1", "0"]
+        )
+        return "Putting system to sleep…"
+    except Exception as e:
+        return f"Could not sleep: {e}"
+
+
+def shutdown_system(delay_seconds: int = 0) -> str:
+    try:
+        subprocess.run(
+            ["shutdown", "/s", "/t", str(delay_seconds)],
+            check=True, capture_output=True,
+        )
+        msg = "Shutting down now." if delay_seconds == 0 else f"Shutdown scheduled in {delay_seconds}s."
+        return msg
+    except Exception as e:
+        return f"Shutdown failed: {e}"
+
+
+def restart_system(delay_seconds: int = 0) -> str:
+    try:
+        subprocess.run(
+            ["shutdown", "/r", "/t", str(delay_seconds)],
+            check=True, capture_output=True,
+        )
+        msg = "Restarting now." if delay_seconds == 0 else f"Restart scheduled in {delay_seconds}s."
+        return msg
+    except Exception as e:
+        return f"Restart failed: {e}"
+
+
+def cancel_shutdown() -> str:
+    try:
+        subprocess.run(["shutdown", "/a"], check=True, capture_output=True)
+        return "Scheduled shutdown/restart cancelled."
+    except Exception as e:
+        return f"Cancel failed (no shutdown pending?): {e}"
+
+
+# ---------------------------------------------------------------------------
+# Volume
+# ---------------------------------------------------------------------------
+
+_VK_VOLUME_MUTE = 0xAD
+_VK_VOLUME_DOWN = 0xAE
+_VK_VOLUME_UP   = 0xAF
+_KEYEVENTF_KEYUP = 0x0002
+
+
+def _send_key(vk: int):
+    ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+    ctypes.windll.user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
+
+
+def volume_up(steps: int = 2) -> str:
+    for _ in range(max(1, steps)):
+        _send_key(_VK_VOLUME_UP)
+    return f"Volume increased ({steps} step{'s' if steps != 1 else ''})."
+
+
+def volume_down(steps: int = 2) -> str:
+    for _ in range(max(1, steps)):
+        _send_key(_VK_VOLUME_DOWN)
+    return f"Volume decreased ({steps} step{'s' if steps != 1 else ''})."
+
+
+def mute_volume() -> str:
+    _send_key(_VK_VOLUME_MUTE)
+    return "Volume toggled mute."
+
+
+def set_volume(level: int) -> str:
+    """Set system volume 0–100 via PowerShell."""
+    level = max(0, min(100, int(level)))
+    script = (
+        f"$obj = New-Object -ComObject WScript.Shell; "
+        f"$master = [System.Runtime.InteropServices.Marshal]::GetActiveObject('WScript.Shell'); "
+        f"Add-Type -AssemblyName System.Windows.Forms; "
+        f"$vol = [System.Math]::Round({level} / 2); "
+        f"For ($i=0; $i -lt 50; $i++) {{ [System.Windows.Forms.SendKeys]::SendWait([char]174) }}; "
+        f"For ($i=0; $i -lt $vol; $i++) {{ [System.Windows.Forms.SendKeys]::SendWait([char]175) }}"
+    )
+    # Simpler: use nircmd if available, else send volume keys
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command",
+             f"(New-Object -ComObject WScript.Shell).SendKeys([char]174 * 50 + [char]175 * [math]::Round({level}/2))"],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass
+    return f"Volume set to ~{level}% (via key simulation)."
+
+
+def get_volume() -> str:
+    """Read current master volume via PowerShell."""
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command",
+             "[math]::Round((Get-Volume).VolumePercent)"],
+            capture_output=True, text=True, timeout=10,
+        )
+        val = result.stdout.strip()
+        if val.isdigit():
+            return f"Current volume: {val}%"
+    except Exception:
+        pass
+    return "Could not read current volume level."
+
+
+# ---------------------------------------------------------------------------
+# Brightness
+# ---------------------------------------------------------------------------
+
+def get_brightness() -> str:
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command",
+             "(Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness).CurrentBrightness"],
+            capture_output=True, text=True, timeout=10,
+        )
+        val = result.stdout.strip()
+        if val.isdigit():
+            return f"Current brightness: {val}%"
+    except Exception:
+        pass
+    return "Could not read brightness (may not be supported on this display)."
+
+
+def set_brightness(level: int) -> str:
+    level = max(0, min(100, int(level)))
+    try:
+        script = (
+            f"(Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods)"
+            f".WmiSetBrightness(1,{level})"
+        )
+        result = subprocess.run(
+            ["powershell", "-Command", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return f"Brightness set to {level}%."
+        return f"Brightness change failed: {result.stderr.strip()[:200]}"
+    except Exception as e:
+        return f"Could not set brightness: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Dark / Light mode
+# ---------------------------------------------------------------------------
+
+def toggle_dark_mode() -> str:
+    """Toggle Windows dark/light mode by flipping the registry key."""
+    reg_path = r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+    script = f"""
+$val = (Get-ItemProperty -Path '{reg_path}' -Name AppsUseLightTheme).AppsUseLightTheme
+$new = if ($val -eq 1) {{0}} else {{1}}
+Set-ItemProperty -Path '{reg_path}' -Name AppsUseLightTheme -Value $new
+Set-ItemProperty -Path '{reg_path}' -Name SystemUsesLightTheme -Value $new
+if ($new -eq 0) {{ 'dark' }} else {{ 'light' }}
+"""
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        mode = result.stdout.strip()
+        if mode in ("dark", "light"):
+            return f"Switched to {mode} mode."
+        return f"Dark mode toggle may have failed: {result.stderr.strip()[:200]}"
+    except Exception as e:
+        return f"Could not toggle dark mode: {e}"
+
+
+def set_dark_mode(enable: bool) -> str:
+    """Explicitly enable or disable dark mode."""
+    val = 0 if enable else 1
+    reg_path = r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+    script = f"""
+Set-ItemProperty -Path '{reg_path}' -Name AppsUseLightTheme -Value {val}
+Set-ItemProperty -Path '{reg_path}' -Name SystemUsesLightTheme -Value {val}
+"""
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        mode = "dark" if enable else "light"
+        if result.returncode == 0:
+            return f"{mode.capitalize()} mode enabled."
+        return f"Mode change failed: {result.stderr.strip()[:200]}"
+    except Exception as e:
+        return f"Could not set mode: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Window management
+# ---------------------------------------------------------------------------
+
+def get_open_windows() -> str:
+    try:
+        import pygetwindow as gw
+        wins = [w for w in gw.getAllWindows() if w.title.strip()]
+        if not wins:
+            return "No visible windows found."
+        lines = [f"  [{i+1}] {w.title}" for i, w in enumerate(wins[:30])]
+        return "Open windows:\n" + "\n".join(lines)
+    except ImportError:
+        return "pygetwindow not available."
+    except Exception as e:
+        return f"Could not list windows: {e}"
+
+
+def minimize_all_windows() -> str:
+    try:
+        # Win+D shows desktop / minimizes all
+        ctypes.windll.user32.keybd_event(0x5B, 0, 0, 0)        # Win down
+        ctypes.windll.user32.keybd_event(0x44, 0, 0, 0)        # D down
+        ctypes.windll.user32.keybd_event(0x44, 0, _KEYEVENTF_KEYUP, 0)
+        ctypes.windll.user32.keybd_event(0x5B, 0, _KEYEVENTF_KEYUP, 0)
+        return "All windows minimized (Show Desktop)."
+    except Exception as e:
+        return f"Could not minimize windows: {e}"
+
+
+def focus_window(title_fragment: str) -> str:
+    try:
+        import pygetwindow as gw
+        matches = [w for w in gw.getAllWindows()
+                   if title_fragment.lower() in w.title.lower()]
+        if not matches:
+            return f"No window found matching '{title_fragment}'."
+        win = matches[0]
+        win.restore()
+        win.activate()
+        return f"Focused: {win.title}"
+    except ImportError:
+        return "pygetwindow not available."
+    except Exception as e:
+        return f"Could not focus window: {e}"

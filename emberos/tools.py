@@ -323,6 +323,344 @@ class ToolRegistry:
             func=_tool_launch_app,
         )
 
+        # ── Document analysis tools ───────────────────────────────
+        self.register(
+            name="summarize_file",
+            description="Read and summarize any supported file (PDF, DOCX, XLSX, PPTX, TXT, CSV, etc.)",
+            parameters={
+                "path": {"type": "string", "description": "File path to summarize"},
+            },
+            func=_tool_summarize_file,
+        )
+        self.register(
+            name="analyze_files",
+            description="Analyze one or more attached files and answer a question about them",
+            parameters={
+                "file_paths": {"type": "array", "description": "List of file paths"},
+                "user_message": {"type": "string", "description": "Question or task about the files"},
+            },
+            func=_tool_analyze_files,
+        )
+        self.register(
+            name="grep_file",
+            description="Search for a regex pattern inside a text file and return matching lines with context",
+            parameters={
+                "path": {"type": "string", "description": "File to search"},
+                "pattern": {"type": "string", "description": "Regex or literal search pattern"},
+                "context_lines": {"type": "integer", "description": "Lines of context around each match (default 2)"},
+                "case_sensitive": {"type": "boolean", "description": "Case-sensitive search (default false)"},
+            },
+            func=_tool_grep_file,
+        )
+        self.register(
+            name="diff_files",
+            description="Show a unified diff between two text files",
+            parameters={
+                "path_a": {"type": "string", "description": "First file path"},
+                "path_b": {"type": "string", "description": "Second file path"},
+            },
+            func=_tool_diff_files,
+        )
+        self.register(
+            name="extract_patterns",
+            description="Extract emails, URLs, phone numbers, dates, and IPs from a file",
+            parameters={
+                "path": {"type": "string", "description": "File to extract patterns from"},
+                "pattern_types": {"type": "array", "description": "Types to extract: email, url, phone, date, ipv4 (default: all)"},
+            },
+            func=_tool_extract_patterns,
+        )
+
+        # ── Archive tools ─────────────────────────────────────────
+        self.register(
+            name="compress_to_zip",
+            description="Compress files or folders into a zip archive",
+            parameters={
+                "sources": {"type": "array", "description": "List of file/folder paths to compress"},
+                "dst": {"type": "string", "description": "Output zip path (optional)"},
+            },
+            func=_tool_compress_to_zip,
+        )
+        self.register(
+            name="extract_archive",
+            description="Extract a zip or tar archive",
+            parameters={
+                "src": {"type": "string", "description": "Archive file path"},
+                "dst": {"type": "string", "description": "Destination folder (optional)"},
+            },
+            func=_tool_extract_archive,
+        )
+        self.register(
+            name="list_archive_contents",
+            description="List files inside a zip or tar archive without extracting",
+            parameters={
+                "src": {"type": "string", "description": "Archive file path"},
+            },
+            func=_tool_list_archive_contents,
+        )
+
+        # ── File discovery tools ──────────────────────────────────
+        self.register(
+            name="find_large_files",
+            description="Find files larger than a size threshold",
+            parameters={
+                "root": {"type": "string", "description": "Directory to search (default: home)"},
+                "min_mb": {"type": "number", "description": "Minimum size in MB (default: 100)"},
+                "limit": {"type": "integer", "description": "Max results (default: 20)"},
+            },
+            func=_tool_find_large_files,
+        )
+        self.register(
+            name="find_old_files",
+            description="Find files not modified for a long time",
+            parameters={
+                "root": {"type": "string", "description": "Directory to search (default: home)"},
+                "older_than_days": {"type": "integer", "description": "Files not modified in N days (default: 365)"},
+                "limit": {"type": "integer", "description": "Max results (default: 20)"},
+            },
+            func=_tool_find_old_files,
+        )
+        self.register(
+            name="find_duplicate_files",
+            description="Find duplicate files (same content) using MD5 hashing",
+            parameters={
+                "root": {"type": "string", "description": "Directory to search (default: home)"},
+                "limit": {"type": "integer", "description": "Max duplicate groups to return (default: 50)"},
+            },
+            func=_tool_find_duplicate_files,
+        )
+
+        # ── Media / image tools ───────────────────────────────────
+        self.register(
+            name="take_screenshot",
+            description="Capture a full-screen screenshot and save it",
+            parameters={
+                "save_path": {"type": "string", "description": "Output file path (optional, defaults to Pictures/EmberOS Screenshots)"},
+            },
+            func=_tool_take_screenshot,
+        )
+        self.register(
+            name="resize_image",
+            description="Resize an image to specified dimensions",
+            parameters={
+                "src": {"type": "string", "description": "Source image path"},
+                "width": {"type": "integer", "description": "Target width in pixels"},
+                "height": {"type": "integer", "description": "Target height in pixels"},
+                "dst": {"type": "string", "description": "Output path (optional)"},
+            },
+            func=_tool_resize_image,
+        )
+        self.register(
+            name="convert_image",
+            description="Convert an image to a different format (PNG, JPEG, BMP, etc.)",
+            parameters={
+                "src": {"type": "string", "description": "Source image path"},
+                "target_format": {"type": "string", "description": "Target format: png, jpg, bmp, webp, etc."},
+                "dst": {"type": "string", "description": "Output path (optional)"},
+            },
+            func=_tool_convert_image,
+        )
+        self.register(
+            name="rotate_image",
+            description="Rotate an image by a given number of degrees",
+            parameters={
+                "src": {"type": "string", "description": "Source image path"},
+                "degrees": {"type": "number", "description": "Rotation degrees (counter-clockwise)"},
+                "dst": {"type": "string", "description": "Output path (optional)"},
+            },
+            func=_tool_rotate_image,
+        )
+        self.register(
+            name="get_image_info",
+            description="Get dimensions, mode, format, and size of an image",
+            parameters={
+                "src": {"type": "string", "description": "Image file path"},
+            },
+            func=_tool_get_image_info,
+        )
+        self.register(
+            name="extract_audio",
+            description="Extract audio track from a video file (requires FFmpeg)",
+            parameters={
+                "video_src": {"type": "string", "description": "Video file path"},
+                "dst": {"type": "string", "description": "Output audio path (optional, defaults to MP3)"},
+            },
+            func=_tool_extract_audio,
+        )
+        self.register(
+            name="extract_video_clip",
+            description="Extract a time-range clip from a video file (requires FFmpeg)",
+            parameters={
+                "src": {"type": "string", "description": "Video file path"},
+                "start": {"type": "string", "description": "Start time (e.g. 00:01:30 or 90)"},
+                "duration": {"type": "string", "description": "Clip duration (e.g. 00:00:30 or 30)"},
+                "dst": {"type": "string", "description": "Output path (optional)"},
+            },
+            func=_tool_extract_video_clip,
+        )
+
+        # ── System control tools ──────────────────────────────────
+        self.register(
+            name="battery_status",
+            description="Check battery percentage and charging state",
+            parameters={},
+            func=_tool_battery_status,
+        )
+        self.register(
+            name="lock_screen",
+            description="Lock the Windows screen",
+            parameters={},
+            func=_tool_lock_screen,
+        )
+        self.register(
+            name="sleep_system",
+            description="Put the computer to sleep",
+            parameters={},
+            func=_tool_sleep_system,
+        )
+        self.register(
+            name="shutdown_system",
+            description="Shut down the computer",
+            parameters={
+                "delay_seconds": {"type": "integer", "description": "Delay before shutdown in seconds (default: 0)"},
+            },
+            func=_tool_shutdown_system,
+        )
+        self.register(
+            name="restart_system",
+            description="Restart the computer",
+            parameters={
+                "delay_seconds": {"type": "integer", "description": "Delay before restart in seconds (default: 0)"},
+            },
+            func=_tool_restart_system,
+        )
+        self.register(
+            name="cancel_shutdown",
+            description="Cancel a pending scheduled shutdown or restart",
+            parameters={},
+            func=_tool_cancel_shutdown,
+        )
+        self.register(
+            name="volume_up",
+            description="Increase system volume",
+            parameters={
+                "steps": {"type": "integer", "description": "Number of volume steps to increase (default: 2)"},
+            },
+            func=_tool_volume_up,
+        )
+        self.register(
+            name="volume_down",
+            description="Decrease system volume",
+            parameters={
+                "steps": {"type": "integer", "description": "Number of volume steps to decrease (default: 2)"},
+            },
+            func=_tool_volume_down,
+        )
+        self.register(
+            name="mute_volume",
+            description="Toggle mute on system volume",
+            parameters={},
+            func=_tool_mute_volume,
+        )
+        self.register(
+            name="get_volume",
+            description="Get the current system volume level",
+            parameters={},
+            func=_tool_get_volume,
+        )
+        self.register(
+            name="get_brightness",
+            description="Get the current screen brightness level",
+            parameters={},
+            func=_tool_get_brightness,
+        )
+        self.register(
+            name="set_brightness",
+            description="Set the screen brightness (0-100)",
+            parameters={
+                "level": {"type": "integer", "description": "Brightness level 0-100"},
+            },
+            func=_tool_set_brightness,
+        )
+        self.register(
+            name="toggle_dark_mode",
+            description="Toggle Windows dark/light mode",
+            parameters={},
+            func=_tool_toggle_dark_mode,
+        )
+        self.register(
+            name="set_dark_mode",
+            description="Enable or disable Windows dark mode explicitly",
+            parameters={
+                "enable": {"type": "boolean", "description": "True for dark mode, False for light mode"},
+            },
+            func=_tool_set_dark_mode,
+        )
+
+        # ── Window management tools ───────────────────────────────
+        self.register(
+            name="get_open_windows",
+            description="List all currently open windows",
+            parameters={},
+            func=_tool_get_open_windows,
+        )
+        self.register(
+            name="minimize_all_windows",
+            description="Minimize all windows and show the desktop",
+            parameters={},
+            func=_tool_minimize_all_windows,
+        )
+        self.register(
+            name="focus_window",
+            description="Bring a window to the foreground by title",
+            parameters={
+                "title_fragment": {"type": "string", "description": "Part of the window title to match"},
+            },
+            func=_tool_focus_window,
+        )
+
+        # ── Task management tools ─────────────────────────────────
+        self.register(
+            name="add_task",
+            description="Add a new to-do task",
+            parameters={
+                "title": {"type": "string", "description": "Task description"},
+                "due_date": {"type": "string", "description": "Optional due date (ISO format or natural text)"},
+                "priority": {"type": "string", "description": "Priority: low, normal, high (default: normal)"},
+            },
+            func=_tool_add_task,
+        )
+        self.register(
+            name="list_tasks",
+            description="List pending or all tasks",
+            parameters={
+                "show_all": {"type": "boolean", "description": "Show completed tasks too (default: false)"},
+            },
+            func=_tool_list_tasks,
+        )
+        self.register(
+            name="complete_task",
+            description="Mark a task as completed by its ID",
+            parameters={
+                "task_id": {"type": "integer", "description": "Task ID to mark complete"},
+            },
+            func=_tool_complete_task,
+        )
+        self.register(
+            name="remove_task",
+            description="Delete a task by its ID",
+            parameters={
+                "task_id": {"type": "integer", "description": "Task ID to delete"},
+            },
+            func=_tool_remove_task,
+        )
+        self.register(
+            name="clear_completed_tasks",
+            description="Remove all completed tasks from the list",
+            parameters={},
+            func=_tool_clear_completed_tasks,
+        )
+
 
 # ── Built-in tool implementations ──────────────────────────────────
 
@@ -338,10 +676,11 @@ def _tool_run_shell(cmd: str) -> str:
 
 
 def _tool_read_file(path: str) -> str:
+    from use_cases.file_analysis import read_attached_file
     p = Path(path)
     if not p.is_absolute():
         p = ROOT_DIR / p
-    return p.read_text(encoding="utf-8", errors="replace")
+    return read_attached_file(str(p))
 
 
 def _tool_write_file(path: str, content: str) -> str:
@@ -523,3 +862,247 @@ def _tool_cpu_temperature() -> str:
 def _tool_launch_app(app_name: str) -> str:
     from use_cases.app_launcher import launch_app
     return launch_app(app_name)
+
+
+# ── Document analysis tool implementations ─────────────────────────
+
+def _tool_summarize_file(path: str) -> str:
+    from use_cases.file_analysis import summarize_file
+    result = summarize_file(path)
+    if result is None:
+        return f"File not found: {path}"
+    return result
+
+
+def _tool_analyze_files(file_paths: list, user_message: str) -> str:
+    from use_cases.file_analysis import analyze_attached_files
+    return analyze_attached_files(file_paths, user_message)
+
+
+def _tool_grep_file(path: str, pattern: str, context_lines: int = 2,
+                    case_sensitive: bool = False) -> str:
+    from use_cases.file_analysis import grep_file
+    return grep_file(path, pattern, context_lines, case_sensitive)
+
+
+def _tool_diff_files(path_a: str, path_b: str) -> str:
+    from use_cases.file_analysis import diff_files
+    return diff_files(path_a, path_b)
+
+
+def _tool_extract_patterns(path: str, pattern_types: list = None) -> dict:
+    from use_cases.file_analysis import extract_patterns
+    return extract_patterns(path, pattern_types)
+
+
+# ── Archive tool implementations ────────────────────────────────────
+
+def _tool_compress_to_zip(sources: list, dst: str = None) -> str:
+    from use_cases.file_ops import compress_to_zip
+    return compress_to_zip(sources, dst)
+
+
+def _tool_extract_archive(src: str, dst: str = None) -> str:
+    from use_cases.file_ops import extract_archive
+    return extract_archive(src, dst)
+
+
+def _tool_list_archive_contents(src: str) -> str:
+    from use_cases.file_ops import list_archive_contents
+    return list_archive_contents(src)
+
+
+# ── File discovery tool implementations ─────────────────────────────
+
+def _tool_find_large_files(root: str = None, min_mb: float = 100,
+                            limit: int = 20) -> list:
+    from use_cases.file_ops import find_large_files
+    return find_large_files(root, min_mb, limit)
+
+
+def _tool_find_old_files(root: str = None, older_than_days: int = 365,
+                          limit: int = 20) -> list:
+    from use_cases.file_ops import find_old_files
+    return find_old_files(root, older_than_days, limit)
+
+
+def _tool_find_duplicate_files(root: str = None, limit: int = 50) -> dict:
+    from use_cases.file_ops import find_duplicate_files
+    return find_duplicate_files(root, limit)
+
+
+# ── Media tool implementations ──────────────────────────────────────
+
+def _tool_take_screenshot(save_path: str = None) -> str:
+    from use_cases.media_ops import take_screenshot
+    return take_screenshot(save_path)
+
+
+def _tool_resize_image(src: str, width: int, height: int, dst: str = None) -> str:
+    from use_cases.media_ops import resize_image
+    return resize_image(src, width, height, dst)
+
+
+def _tool_convert_image(src: str, target_format: str, dst: str = None) -> str:
+    from use_cases.media_ops import convert_image
+    return convert_image(src, target_format, dst)
+
+
+def _tool_rotate_image(src: str, degrees: float, dst: str = None) -> str:
+    from use_cases.media_ops import rotate_image
+    return rotate_image(src, degrees, dst)
+
+
+def _tool_get_image_info(src: str) -> str:
+    from use_cases.media_ops import get_image_info
+    return get_image_info(src)
+
+
+def _tool_extract_audio(video_src: str, dst: str = None) -> str:
+    from use_cases.media_ops import extract_audio
+    return extract_audio(video_src, dst)
+
+
+def _tool_extract_video_clip(src: str, start: str, duration: str,
+                              dst: str = None) -> str:
+    from use_cases.media_ops import extract_video_clip
+    return extract_video_clip(src, start, duration, dst)
+
+
+# ── System control tool implementations ─────────────────────────────
+
+def _tool_battery_status() -> str:
+    from use_cases.system_queries import get_battery_status
+    return get_battery_status()
+
+
+def _tool_lock_screen() -> str:
+    from use_cases.system_queries import lock_screen
+    return lock_screen()
+
+
+def _tool_sleep_system() -> str:
+    from use_cases.system_queries import sleep_system
+    return sleep_system()
+
+
+def _tool_shutdown_system(delay_seconds: int = 0) -> str:
+    from use_cases.system_queries import shutdown_system
+    return shutdown_system(delay_seconds)
+
+
+def _tool_restart_system(delay_seconds: int = 0) -> str:
+    from use_cases.system_queries import restart_system
+    return restart_system(delay_seconds)
+
+
+def _tool_cancel_shutdown() -> str:
+    from use_cases.system_queries import cancel_shutdown
+    return cancel_shutdown()
+
+
+def _tool_volume_up(steps: int = 2) -> str:
+    from use_cases.system_queries import volume_up
+    return volume_up(steps)
+
+
+def _tool_volume_down(steps: int = 2) -> str:
+    from use_cases.system_queries import volume_down
+    return volume_down(steps)
+
+
+def _tool_mute_volume() -> str:
+    from use_cases.system_queries import mute_volume
+    return mute_volume()
+
+
+def _tool_get_volume() -> str:
+    from use_cases.system_queries import get_volume
+    return get_volume()
+
+
+def _tool_get_brightness() -> str:
+    from use_cases.system_queries import get_brightness
+    return get_brightness()
+
+
+def _tool_set_brightness(level: int) -> str:
+    from use_cases.system_queries import set_brightness
+    return set_brightness(level)
+
+
+def _tool_toggle_dark_mode() -> str:
+    from use_cases.system_queries import toggle_dark_mode
+    return toggle_dark_mode()
+
+
+def _tool_set_dark_mode(enable: bool) -> str:
+    from use_cases.system_queries import set_dark_mode
+    return set_dark_mode(enable)
+
+
+# ── Window management tool implementations ───────────────────────────
+
+def _tool_get_open_windows() -> str:
+    from use_cases.system_queries import get_open_windows
+    return get_open_windows()
+
+
+def _tool_minimize_all_windows() -> str:
+    from use_cases.system_queries import minimize_all_windows
+    return minimize_all_windows()
+
+
+def _tool_focus_window(title_fragment: str) -> str:
+    from use_cases.system_queries import focus_window
+    return focus_window(title_fragment)
+
+
+# ── Task management tool implementations ─────────────────────────────
+
+_task_manager = None
+
+
+def _get_task_manager():
+    global _task_manager
+    if _task_manager is None:
+        from use_cases.tasks import TaskManager
+        _task_manager = TaskManager()
+    return _task_manager
+
+
+def _tool_add_task(title: str, due_date: str = None, priority: str = "normal") -> str:
+    task = _get_task_manager().add(title, due_date, priority)
+    return f"Task #{task['id']} added: {task['title']} (priority: {task['priority']})"
+
+
+def _tool_list_tasks(show_all: bool = False) -> str:
+    mgr = _get_task_manager()
+    tasks = mgr.list_all() if show_all else mgr.list_pending()
+    if not tasks:
+        return "No tasks found." if show_all else "No pending tasks."
+    lines = []
+    for t in tasks:
+        done = "[x]" if t["completed"] else "[ ]"
+        pri  = f"[{t['priority']}]" if t["priority"] != "normal" else ""
+        due  = f" — due: {t['due_date']}" if t["due_date"] else ""
+        lines.append(f"  #{t['id']} {done} {pri} {t['title']}{due}")
+    label = "All tasks" if show_all else "Pending tasks"
+    return f"{label} ({len(tasks)}):\n" + "\n".join(lines)
+
+
+def _tool_complete_task(task_id: int) -> str:
+    task = _get_task_manager().complete(int(task_id))
+    if task is None:
+        return f"Task #{task_id} not found or already completed."
+    return f"Task #{task_id} completed: {task['title']}"
+
+
+def _tool_remove_task(task_id: int) -> str:
+    removed = _get_task_manager().remove(int(task_id))
+    return f"Task #{task_id} deleted." if removed else f"Task #{task_id} not found."
+
+
+def _tool_clear_completed_tasks() -> str:
+    count = _get_task_manager().clear_completed()
+    return f"Cleared {count} completed task(s)."

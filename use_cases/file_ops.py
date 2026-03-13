@@ -1,8 +1,11 @@
 """File management operations for EmberOS-Windows."""
 
+import hashlib
 import logging
 import os
 import shutil
+import tarfile
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -231,3 +234,182 @@ def list_directory(path: str) -> list[dict]:
             "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
         })
     return items
+
+
+# ---------------------------------------------------------------------------
+# Archive operations
+# ---------------------------------------------------------------------------
+
+def compress_to_zip(sources: list[str], dst: str = None) -> str:
+    """Compress one or more files/folders into a zip archive."""
+    paths = [Path(s) for s in sources]
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        return f"Not found: {', '.join(missing)}"
+
+    if dst:
+        out = Path(dst)
+    else:
+        first = paths[0]
+        out = first.parent / f"{first.stem}_archive.zip"
+
+    try:
+        with zipfile.ZipFile(str(out), "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in paths:
+                if p.is_dir():
+                    for f in p.rglob("*"):
+                        if f.is_file():
+                            zf.write(str(f), f.relative_to(p.parent))
+                else:
+                    zf.write(str(p), p.name)
+        size = _human_size(out.stat().st_size)
+        return f"Archive created: {out} ({size})"
+    except Exception as e:
+        return f"Compression failed: {e}"
+
+
+def extract_archive(src: str, dst: str = None) -> str:
+    """Extract a .zip or .tar/.tar.gz/.tar.bz2 archive."""
+    p = Path(src)
+    if not p.exists():
+        return f"File not found: {src}"
+
+    out_dir = Path(dst) if dst else p.parent / p.stem
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        ext = p.suffix.lower()
+        name_lower = p.name.lower()
+        if ext == ".zip":
+            with zipfile.ZipFile(str(p), "r") as zf:
+                zf.extractall(str(out_dir))
+        elif ext in (".tar",) or name_lower.endswith((".tar.gz", ".tgz", ".tar.bz2")):
+            mode = "r:*"
+            with tarfile.open(str(p), mode) as tf:
+                tf.extractall(str(out_dir))
+        elif ext in (".gz", ".bz2"):
+            mode = f"r:{ext.lstrip('.')}"
+            with tarfile.open(str(p), mode) as tf:
+                tf.extractall(str(out_dir))
+        else:
+            return f"Unsupported archive format: {ext}"
+        return f"Extracted to: {out_dir}"
+    except Exception as e:
+        return f"Extraction failed: {e}"
+
+
+def list_archive_contents(src: str) -> str:
+    """List files inside a .zip or .tar archive without extracting."""
+    p = Path(src)
+    if not p.exists():
+        return f"File not found: {src}"
+    try:
+        ext = p.suffix.lower()
+        if ext == ".zip":
+            with zipfile.ZipFile(str(p), "r") as zf:
+                names = zf.namelist()
+        elif ext in (".tar", ".gz", ".bz2", ".tgz"):
+            mode = "r:*"
+            with tarfile.open(str(p), mode) as tf:
+                names = tf.getnames()
+        else:
+            return f"Unsupported archive format: {ext}"
+        total = len(names)
+        shown = names[:100]
+        lines = [f"Archive: {p.name} ({total} entries)"] + shown
+        if total > 100:
+            lines.append(f"[... and {total - 100} more]")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Could not read archive: {e}"
+
+
+# ---------------------------------------------------------------------------
+# File analysis helpers
+# ---------------------------------------------------------------------------
+
+def find_large_files(root: str = None, min_mb: float = 100,
+                     limit: int = 20) -> list[dict]:
+    """Find files larger than min_mb megabytes."""
+    search_root = Path(root) if root else Path.home()
+    min_bytes = int(min_mb * 1024 * 1024)
+    results = []
+    try:
+        for p in search_root.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size >= min_bytes:
+                results.append({"path": str(p), "size_bytes": size,
+                                 "size_human": _human_size(size)})
+            if len(results) >= limit * 3:
+                break
+    except PermissionError:
+        pass
+    results.sort(key=lambda x: -x["size_bytes"])
+    return results[:limit]
+
+
+def find_old_files(root: str = None, older_than_days: int = 365,
+                   limit: int = 20) -> list[dict]:
+    """Find files not modified in the last older_than_days days."""
+    search_root = Path(root) if root else Path.home()
+    cutoff = datetime.now().timestamp() - (older_than_days * 86400)
+    results = []
+    try:
+        for p in search_root.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if mtime < cutoff:
+                results.append({
+                    "path": str(p),
+                    "last_modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d"),
+                })
+            if len(results) >= limit * 3:
+                break
+    except PermissionError:
+        pass
+    results.sort(key=lambda x: x["last_modified"])
+    return results[:limit]
+
+
+def find_duplicate_files(root: str = None, limit: int = 50) -> dict:
+    """Find duplicate files (same content) using MD5 hashing."""
+    search_root = Path(root) if root else Path.home()
+    hashes: dict[str, list[str]] = {}
+    count = 0
+    try:
+        for p in search_root.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                h = hashlib.md5(p.read_bytes()).hexdigest()
+                hashes.setdefault(h, []).append(str(p))
+                count += 1
+                if count >= 2000:
+                    break
+            except (OSError, PermissionError):
+                continue
+    except PermissionError:
+        pass
+    duplicates = {h: paths for h, paths in hashes.items() if len(paths) > 1}
+    # Return up to `limit` groups
+    subset = dict(list(duplicates.items())[:limit])
+    total_wasted = sum(
+        Path(paths[0]).stat().st_size * (len(paths) - 1)
+        for paths in subset.values()
+        if Path(paths[0]).exists()
+    )
+    return {
+        "duplicate_groups": len(duplicates),
+        "shown": len(subset),
+        "wasted_space": _human_size(total_wasted),
+        "groups": subset,
+    }

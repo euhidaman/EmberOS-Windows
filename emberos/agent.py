@@ -71,9 +71,104 @@ _FILE_ORGANIZE_KEYWORDS = (
     "organize files by type",
 )
 
+_FILE_SUMMARIZE_KEYWORDS = (
+    "what's in", "whats in", "what is in", "what's inside",
+    "summarize", "summarise", "summary of",
+    "read the file", "read this file", "read that file",
+    "describe the file", "what does the file",
+    "contents of", "content of",
+    "analyze the file", "analyse the file",
+    "tell me about the file", "tell me what's in",
+)
+
+_FILE_DELETE_KEYWORDS = (
+    "delete the file", "delete file", "delete this file",
+    "remove the file", "remove file", "remove this file",
+    "delete the document", "remove the document",
+    "get rid of", "erase the file", "erase file",
+)
+
+# ── New capability keyword groups ───────────────────────────────────────────
+
+_SCREENSHOT_KEYWORDS = (
+    "take a screenshot", "take screenshot", "capture screenshot",
+    "screenshot my", "screenshot the screen", "screen capture",
+)
+_VOLUME_UP_KEYWORDS = ("volume up", "turn up volume", "increase volume", "louder")
+_VOLUME_DOWN_KEYWORDS = ("volume down", "turn down volume", "decrease volume", "quieter", "lower the volume")
+_MUTE_KEYWORDS = ("mute", "unmute", "toggle mute", "silence the audio")
+_DARK_MODE_KEYWORDS = ("dark mode", "light mode", "enable dark mode", "disable dark mode",
+                        "turn on dark mode", "turn off dark mode", "switch to dark", "switch to light",
+                        "toggle dark mode", "toggle theme")
+_BATTERY_KEYWORDS = ("battery", "battery level", "how much battery", "battery status",
+                      "battery percentage", "battery charge")
+_LOCK_KEYWORDS = ("lock the screen", "lock screen", "lock computer", "lock my pc",
+                   "lock the computer", "lock workstation")
+_SLEEP_KEYWORDS = ("sleep the computer", "put to sleep", "put computer to sleep",
+                    "sleep mode", "hibernate")
+_SHUTDOWN_KEYWORDS = ("shut down", "shutdown the computer", "power off", "turn off the pc",
+                       "turn off the computer", "turn off computer")
+_RESTART_KEYWORDS = ("restart", "reboot", "restart the computer", "restart my pc",
+                      "reboot the computer")
+_BRIGHTNESS_KEYWORDS = ("brightness", "screen brightness", "set brightness",
+                          "increase brightness", "decrease brightness", "dim the screen")
+_WINDOW_LIST_KEYWORDS = ("open windows", "list windows", "show windows", "what windows",
+                          "which windows", "what's open", "whats open")
+_WINDOW_MIN_KEYWORDS = ("minimize all", "show desktop", "hide all windows",
+                         "minimize all windows", "win d", "win+d")
+_WINDOW_FOCUS_KEYWORDS = ("focus on", "switch to window", "bring up", "focus window")
+
+_TASK_ADD_KEYWORDS = ("add a task", "add task", "create a task", "create task",
+                        "new task", "add to my tasks", "add to tasks", "todo:", "to-do:",
+                        "remind me to", "i need to", "task:")
+_TASK_LIST_KEYWORDS = ("show my tasks", "list my tasks", "show tasks", "list tasks",
+                         "what are my tasks", "pending tasks", "my to-do", "my todo",
+                         "task list", "show todo")
+_TASK_COMPLETE_KEYWORDS = ("complete task", "mark task", "done task", "finish task",
+                             "mark as done", "complete #", "done #", "task done")
+_TASK_REMOVE_KEYWORDS = ("remove task", "delete task", "delete to-do", "remove todo")
+_TASK_CLEAR_KEYWORDS = ("clear completed tasks", "clear done tasks", "remove completed",
+                          "clean up tasks", "clear finished tasks")
+
+_COMPRESS_KEYWORDS = ("compress", "zip the file", "zip the folder", "create a zip",
+                        "create zip", "archive the file", "zip files")
+_EXTRACT_KEYWORDS = ("extract", "unzip", "extract the archive", "extract from zip",
+                      "unzip the file", "unpack")
+_FIND_LARGE_KEYWORDS = ("large files", "biggest files", "find large files",
+                          "files taking up space", "huge files", "find files larger")
+_FIND_OLD_KEYWORDS = ("old files", "oldest files", "find old files",
+                        "files not modified", "stale files")
+_FIND_DUPES_KEYWORDS = ("duplicate files", "find duplicates", "find duplicate files",
+                          "same files", "identical files", "dedup")
+_GREP_KEYWORDS = ("search inside", "grep", "find text in", "search text in",
+                    "look inside", "find in file", "search for text in")
+_DIFF_KEYWORDS = ("diff", "compare file", "compare the files", "what changed between",
+                    "difference between files", "show diff")
+_EXTRACT_PATTERNS_KEYWORDS = ("extract emails", "find emails", "extract urls", "find urls",
+                                "find phone numbers", "extract phone", "extract dates from",
+                                "extract ips", "extract patterns")
+
+# ── Known file extensions for query parsing ──────────────────────────────────
+_KNOWN_EXTENSIONS = (
+    "pdf", "docx", "xlsx", "pptx", "txt", "md", "csv",
+    "py", "js", "ts", "json", "log", "html", "xml", "yaml", "yml",
+    "cpp", "c", "h", "rs", "go", "java", "rb", "bat", "ps1", "zip",
+)
+
 
 _CONFIRM_YES = {"yes", "y", "proceed", "ok", "sure", "do it", "go ahead", "yep", "yeah"}
 _CONFIRM_NO = {"no", "n", "cancel", "stop", "nope", "don't", "abort"}
+
+_IDENTITY_KEYWORDS = (
+    "what are you", "who are you", "what can you do", "tell me about yourself",
+    "introduce yourself", "what is emberos", "what is ember os", "how do you work",
+    "what are your capabilities", "what do you do", "describe yourself",
+    "your name", "are you an ai", "are you a bot",
+)
+_GREETING_KEYWORDS = (
+    "hello", "hi!", "hi there", "hey!", "hey there",
+    "good morning", "good evening", "good afternoon", "howdy",
+)
 
 
 def _extract_explicit_tags(text: str):
@@ -101,6 +196,100 @@ def _extract_explicit_tags(text: str):
             clean = text[:m.start()].strip()
             return clean, tags
     return text, []
+
+
+def _looks_like_tool_call(text: str) -> bool:
+    """Return True if text appears to be a (possibly malformed) tool call JSON."""
+    t = text.strip()
+    return (t.startswith("{") or t.startswith("[{")) and '"tool"' in t
+
+
+def _parse_file_query(text: str):
+    """Parse a natural-language file reference into (filename, search_root).
+
+    Examples
+    --------
+    "what's in energy.pdf"                         -> ("energy.pdf", None)
+    "summarize quantum.pdf in the Quant folder in E drive" -> ("quantum.pdf", "E:\\Quant")
+    "what's in notes.txt in downloads"             -> ("notes.txt", "<home>/Downloads")
+    "read C:\\Users\\TinyLab\\report.docx"         -> ("C:\\Users\\TinyLab\\report.docx", None)
+    """
+    import os
+    from pathlib import Path as _Path
+
+    # 1. Absolute Windows path (e.g. C:\something\file.ext)
+    abs_match = re.search(r'[A-Za-z]:\\[\w\\/ \-\.]+', text)
+    if abs_match:
+        raw = abs_match.group().rstrip()
+        p = _Path(raw)
+        if p.suffix:
+            return raw, None            # full file path
+        # It's a directory — see if a filename appears before it
+        fname_m = re.search(_ext_pattern(), text[:abs_match.start()])
+        if fname_m:
+            return fname_m.group().strip(), raw
+        return None, raw
+
+    # 2. Extract filename (word.ext)
+    ext_pat = _ext_pattern()
+    fname_m = re.search(ext_pat, text, re.IGNORECASE)
+    if not fname_m:
+        return None, None
+    filename = fname_m.group().strip()
+
+    # Everything after the filename is the location description
+    after = text[fname_m.end():]
+
+    # 3. Drive letter:  "E drive", "E:", "drive E", "on the E drive"
+    drive = None
+    dm = re.search(
+        r'\b([C-Zc-z])\s+drive\b|drive\s+([C-Zc-z])\b|\b([C-Zc-z]):\B',
+        text, re.IGNORECASE,
+    )
+    if dm:
+        drive = (dm.group(1) or dm.group(2) or dm.group(3)).upper()
+
+    # 4. Folder name after "in/from/on/at [the/my] <name> [folder/directory]"
+    folder = None
+    fm = re.search(
+        r'(?:in|from|on|at)\s+(?:the\s+)?(?:my\s+)?([\w][\w\-\. ]{1,40}?)'
+        r'\s*(?:folder|directory|dir)?\s*(?:in\b|on\b|at\b|$)',
+        after, re.IGNORECASE,
+    )
+    if fm:
+        candidate = fm.group(1).strip().rstrip()
+        _noise = {'the', 'my', 'a', 'an', 'this', 'that',
+                  'e', 'c', 'd', 'f', 'g', 'drive'}
+        if candidate.lower() not in _noise and len(candidate) > 1:
+            folder = candidate
+
+    # 5. Build search root
+    home = os.path.expanduser("~")
+    _folder_map = {
+        "downloads":  os.path.join(home, "Downloads"),
+        "documents":  os.path.join(home, "Documents"),
+        "desktop":    os.path.join(home, "Desktop"),
+        "pictures":   os.path.join(home, "Pictures"),
+        "videos":     os.path.join(home, "Videos"),
+        "music":      os.path.join(home, "Music"),
+    }
+
+    if drive and folder:
+        search_root = f"{drive}:\\{folder}"
+    elif drive:
+        search_root = f"{drive}:\\"
+    elif folder:
+        search_root = _folder_map.get(folder.lower(), folder)
+    else:
+        search_root = None      # caller will search default locations
+
+    return filename, search_root
+
+
+def _ext_pattern():
+    """Return a compiled-ready regex pattern for filenames with known extensions."""
+    exts = "|".join(_KNOWN_EXTENSIONS)
+    return rf'[\w\-\.]+\.(?:{exts})'
 
 
 class EmberAgent:
@@ -157,9 +346,9 @@ class EmberAgent:
         system_msg = (
             f"{compact_prompt}\n"
             f"Context: {compact_context}\n"
-            "If a tool is needed, reply with JSON only.\n"
+            "For actions/tasks use JSON only:\n"
             '{"tool":"tool_name","params":{"arg":"value"}}\n'
-            "Multiple tools: JSON array only.\n"
+            "For questions/chat reply in plain text. Do NOT use JSON for conversation.\n"
             "Tools: "
             + ", ".join(tool_signatures)
         )
@@ -290,7 +479,15 @@ class EmberAgent:
 
     def _route_special_intents(self, user_input: str) -> Optional[str]:
         """Check for special intents and handle them directly. Returns response or None."""
-        lower = user_input.lower()
+        lower = user_input.lower().strip()
+
+        # Identity / self-description
+        if any(kw in lower for kw in _IDENTITY_KEYWORDS):
+            return self._handle_identity()
+
+        # Greetings
+        if lower in _GREETING_KEYWORDS or lower.rstrip("!,.?") in _GREETING_KEYWORDS:
+            return self._handle_greeting()
 
         # Note saving
         if any(kw in lower for kw in _NOTE_SAVE_KEYWORDS):
@@ -324,6 +521,18 @@ class EmberAgent:
         if file_org is not None:
             return file_org
 
+        # File summarization ("what's in X.pdf", "summarize report.docx in E:\Quant")
+        if any(kw in lower for kw in _FILE_SUMMARIZE_KEYWORDS):
+            result = self._handle_file_summarize(user_input)
+            if result is not None:
+                return result
+
+        # File deletion ("delete report.pdf from Downloads")
+        if any(kw in lower for kw in _FILE_DELETE_KEYWORDS):
+            result = self._handle_file_delete(user_input)
+            if result is not None:
+                return result
+
         # Web search stub
         if any(kw in lower for kw in _WEB_SEARCH_KEYWORDS):
             return self._handle_web_search(user_input)
@@ -337,7 +546,274 @@ class EmberAgent:
             return ("Vision analysis is planned for a future version of EmberOS-Windows. "
                     "Currently I can analyze text, code, CSV, and document files.")
 
+        # Screenshot
+        if any(kw in lower for kw in _SCREENSHOT_KEYWORDS):
+            return self._handle_screenshot(user_input)
+
+        # Volume
+        if any(kw in lower for kw in _VOLUME_UP_KEYWORDS):
+            return self._handle_volume("up", user_input)
+        if any(kw in lower for kw in _VOLUME_DOWN_KEYWORDS):
+            return self._handle_volume("down", user_input)
+        if any(kw in lower for kw in _MUTE_KEYWORDS):
+            return self._handle_mute()
+
+        # Dark mode / theme
+        if any(kw in lower for kw in _DARK_MODE_KEYWORDS):
+            return self._handle_dark_mode(user_input)
+
+        # Brightness
+        if any(kw in lower for kw in _BRIGHTNESS_KEYWORDS):
+            return self._handle_brightness(user_input)
+
+        # Battery
+        if any(kw in lower for kw in _BATTERY_KEYWORDS):
+            from use_cases.system_queries import get_battery_status
+            return get_battery_status()
+
+        # Screen lock / sleep / power
+        if any(kw in lower for kw in _LOCK_KEYWORDS):
+            from use_cases.system_queries import lock_screen
+            return lock_screen()
+        if any(kw in lower for kw in _SLEEP_KEYWORDS):
+            from use_cases.system_queries import sleep_system
+            return sleep_system()
+        if any(kw in lower for kw in _SHUTDOWN_KEYWORDS):
+            return self._handle_power("shutdown", user_input)
+        if any(kw in lower for kw in _RESTART_KEYWORDS):
+            return self._handle_power("restart", user_input)
+
+        # Window management
+        if any(kw in lower for kw in _WINDOW_LIST_KEYWORDS):
+            from use_cases.system_queries import get_open_windows
+            return get_open_windows()
+        if any(kw in lower for kw in _WINDOW_MIN_KEYWORDS):
+            from use_cases.system_queries import minimize_all_windows
+            return minimize_all_windows()
+        if any(kw in lower for kw in _WINDOW_FOCUS_KEYWORDS):
+            return self._handle_window_focus(user_input)
+
+        # Task management
+        if any(kw in lower for kw in _TASK_ADD_KEYWORDS):
+            return self._handle_task_add(user_input)
+        if any(kw in lower for kw in _TASK_LIST_KEYWORDS):
+            return self._handle_task_list(user_input)
+        if any(kw in lower for kw in _TASK_COMPLETE_KEYWORDS):
+            return self._handle_task_complete(user_input)
+        if any(kw in lower for kw in _TASK_REMOVE_KEYWORDS):
+            return self._handle_task_remove(user_input)
+        if any(kw in lower for kw in _TASK_CLEAR_KEYWORDS):
+            return self._handle_task_clear()
+
+        # Archive operations
+        if any(kw in lower for kw in _COMPRESS_KEYWORDS):
+            return self._handle_compress(user_input)
+        if any(kw in lower for kw in _EXTRACT_KEYWORDS):
+            return self._handle_extract(user_input)
+
+        # File discovery
+        if any(kw in lower for kw in _FIND_LARGE_KEYWORDS):
+            return self._handle_find_large_files(user_input)
+        if any(kw in lower for kw in _FIND_OLD_KEYWORDS):
+            return self._handle_find_old_files(user_input)
+        if any(kw in lower for kw in _FIND_DUPES_KEYWORDS):
+            return self._handle_find_duplicates(user_input)
+
+        # Content search / analysis
+        if any(kw in lower for kw in _GREP_KEYWORDS):
+            return self._handle_grep(user_input)
+        if any(kw in lower for kw in _DIFF_KEYWORDS):
+            return self._handle_diff(user_input)
+        if any(kw in lower for kw in _EXTRACT_PATTERNS_KEYWORDS):
+            return self._handle_extract_patterns(user_input)
+
         return None
+
+    def _handle_file_summarize(self, user_input: str) -> Optional[str]:
+        """Find a file from a natural-language description and summarize its contents."""
+        from use_cases.file_analysis import summarize_file, find_similar_files
+        import os
+        from pathlib import Path
+
+        filename, search_root = _parse_file_query(user_input)
+        if not filename:
+            return None  # couldn't parse a filename — let LLM handle it
+
+        # --- Case 1: absolute path was given ---
+        if os.path.isabs(filename) or (len(filename) > 2 and filename[1] == ':'):
+            result = summarize_file(filename, llm_client=self.llm)
+            if result is not None:
+                return result
+            suggestions = find_similar_files(
+                os.path.basename(filename),
+                [os.path.dirname(filename)] if os.path.dirname(filename) else None,
+            )
+            msg = f"File not found: {filename}"
+            if suggestions:
+                msg += "\n\nDid you mean:\n" + "\n".join(f"  • {s}" for s in suggestions)
+            return msg
+
+        # --- Case 2: search_root given (drive/folder specified) ---
+        if search_root:
+            # Try direct path first
+            candidate = os.path.join(search_root, filename)
+            result = summarize_file(candidate, llm_client=self.llm)
+            if result is not None:
+                return result
+
+            # Recursive search inside search_root
+            root_path = Path(search_root)
+            if root_path.exists():
+                try:
+                    for p in root_path.rglob(filename):
+                        r = summarize_file(str(p), llm_client=self.llm)
+                        if r is not None:
+                            return r
+                        break
+                except (PermissionError, OSError):
+                    pass
+
+            # Not found — suggest similar files in that root and elsewhere
+            suggestions = find_similar_files(filename, [search_root])
+            if not suggestions:
+                suggestions = find_similar_files(filename)
+
+            msg = f"'{filename}' not found in {search_root}."
+            if suggestions:
+                names = [f"  • {s}  (in {os.path.dirname(s) or '.'})" for s in suggestions]
+                msg += "\n\nDid you mean:\n" + "\n".join(names)
+            return msg
+
+        # --- Case 3: no location given — search default locations ---
+        home = os.path.expanduser("~")
+        default_roots = [
+            os.path.join(home, "Desktop"),
+            os.path.join(home, "Downloads"),
+            os.path.join(home, "Documents"),
+            os.path.join(home, "Pictures"),
+            os.path.join(home, "Videos"),
+            home,
+        ]
+        for root in default_roots:
+            p = Path(root) / filename
+            result = summarize_file(str(p), llm_client=self.llm)
+            if result is not None:
+                return result
+            # Shallow rglob (2 levels) to avoid scanning whole drive
+            try:
+                for found in Path(root).rglob(filename):
+                    r = summarize_file(str(found), llm_client=self.llm)
+                    if r is not None:
+                        return r
+                    break
+            except (PermissionError, OSError):
+                pass
+
+        # Still not found — fuzzy suggestions from common locations
+        suggestions = find_similar_files(filename, default_roots)
+        msg = f"'{filename}' was not found in your common folders."
+        if suggestions:
+            names = [f"  • {os.path.basename(s)}  (in {os.path.dirname(s)})" for s in suggestions]
+            msg += "\n\nDid you mean:\n" + "\n".join(names)
+        else:
+            msg += "\nMake sure the file exists and try specifying the folder, e.g.:\n  what's in report.pdf in downloads"
+        return msg
+
+    def _handle_file_delete(self, user_input: str) -> Optional[str]:
+        """Find a file from a natural-language description and prompt for confirmation before deleting."""
+        from use_cases.file_analysis import find_similar_files
+        import os
+        from pathlib import Path
+
+        filename, search_root = _parse_file_query(user_input)
+        if not filename:
+            return None
+
+        # Resolve the full path
+        resolved = None
+
+        if os.path.isabs(filename) or (len(filename) > 2 and filename[1] == ':'):
+            if os.path.exists(filename):
+                resolved = filename
+        elif search_root:
+            candidate = os.path.join(search_root, filename)
+            if os.path.exists(candidate):
+                resolved = candidate
+            else:
+                root_path = Path(search_root)
+                if root_path.exists():
+                    for p in root_path.rglob(filename):
+                        resolved = str(p)
+                        break
+        else:
+            home = os.path.expanduser("~")
+            default_roots = [
+                os.path.join(home, "Desktop"),
+                os.path.join(home, "Downloads"),
+                os.path.join(home, "Documents"),
+                home,
+            ]
+            for root in default_roots:
+                candidate = os.path.join(root, filename)
+                if os.path.exists(candidate):
+                    resolved = candidate
+                    break
+                try:
+                    for found in Path(root).rglob(filename):
+                        resolved = str(found)
+                        break
+                except (PermissionError, OSError):
+                    pass
+                if resolved:
+                    break
+
+        if not resolved:
+            suggestions = find_similar_files(filename, [search_root] if search_root else None)
+            msg = f"'{filename}' was not found."
+            if suggestions:
+                msg += "\n\nDid you mean:\n" + "\n".join(f"  • {s}" for s in suggestions)
+            return msg
+
+        self.pending_confirmation = {
+            "action": "delete_file",
+            "params": {"path": resolved},
+            "description": f"Delete: {resolved}",
+        }
+        size = os.path.getsize(resolved) if os.path.isfile(resolved) else 0
+        size_str = f"{size // 1024} KB" if size >= 1024 else f"{size} B"
+        return (
+            f"Are you sure you want to permanently delete:\n"
+            f"  {resolved}  ({size_str})\n\n"
+            f"A backup snapshot will be created first. (yes/no)"
+        )
+
+    def _handle_identity(self) -> str:
+        return (
+            "I'm EmberOS — a local AI agent running on your Windows machine.\n\n"
+            "I can help with:\n"
+            "  • File management — find, organize, move, copy, delete, compress, extract files\n"
+            "  • File analysis — read/summarize PDF, DOCX, XLSX, PPTX, CSV, TXT and more\n"
+            "  • Content search — grep files, diff two files, extract emails/URLs/phone numbers\n"
+            "  • System info — disk, RAM, CPU, processes, uptime, battery\n"
+            "  • System control — volume, brightness, dark mode, lock, sleep, shutdown, restart\n"
+            "  • Window management — list open windows, minimize all, focus a window\n"
+            "  • Media — take screenshots, resize/convert/rotate images\n"
+            "  • App launching — open calculator, notepad, VS Code, browser, etc.\n"
+            "  • Task management — add, list, complete, and remove to-do tasks\n"
+            "  • Notes & memory — save and search notes across sessions\n"
+            "  • Shell commands — run PowerShell or CMD commands\n\n"
+            "Type :help to see REPL commands, or just ask me anything."
+        )
+
+    def _handle_greeting(self) -> str:
+        import random
+        greetings = [
+            "Hello! How can I help you today?",
+            "Hey! What can I do for you?",
+            "Hi there! Ready to help. What do you need?",
+            "Hello! I'm here and running. What's on your mind?",
+        ]
+        return random.choice(greetings)
 
     def _handle_note_save(self, user_input: str) -> str:
         """Save a user note."""
@@ -618,6 +1094,389 @@ class EmberAgent:
         }
         return "\n".join(lines)
 
+    # ── New capability handlers ──────────────────────────────────
+
+    def _handle_screenshot(self, user_input: str) -> str:
+        from use_cases.media_ops import take_screenshot
+        return take_screenshot()
+
+    def _handle_volume(self, direction: str, user_input: str) -> str:
+        import re as _re
+        from use_cases.system_queries import volume_up, volume_down, get_volume
+        # Try to extract a step count ("turn up volume by 5")
+        m = _re.search(r'\b(\d+)\b', user_input)
+        steps = int(m.group(1)) if m else 2
+        if direction == "up":
+            result = volume_up(steps)
+        else:
+            result = volume_down(steps)
+        # Append current level if readable
+        level = get_volume()
+        if "%" in level:
+            result += f"\n{level}"
+        return result
+
+    def _handle_mute(self) -> str:
+        from use_cases.system_queries import mute_volume
+        return mute_volume()
+
+    def _handle_dark_mode(self, user_input: str) -> str:
+        from use_cases.system_queries import set_dark_mode, toggle_dark_mode
+        lower = user_input.lower()
+        if "dark" in lower and any(w in lower for w in ("enable", "turn on", "switch to", "on")):
+            return set_dark_mode(True)
+        if "light" in lower and any(w in lower for w in ("enable", "turn on", "switch to", "on")):
+            return set_dark_mode(False)
+        if "dark" in lower and any(w in lower for w in ("disable", "turn off", "off")):
+            return set_dark_mode(False)
+        return toggle_dark_mode()
+
+    def _handle_brightness(self, user_input: str) -> str:
+        import re as _re
+        from use_cases.system_queries import get_brightness, set_brightness
+        # Look for a percentage or number
+        m = _re.search(r'\b(\d{1,3})\s*%?', user_input)
+        if m:
+            return set_brightness(int(m.group(1)))
+        lower = user_input.lower()
+        if any(w in lower for w in ("increase", "higher", "brighter", "up", "raise")):
+            curr = get_brightness()
+            # Parse currently, add 20
+            nm = _re.search(r'(\d+)', curr)
+            new_val = min(100, int(nm.group(1)) + 20) if nm else 80
+            return set_brightness(new_val)
+        if any(w in lower for w in ("decrease", "lower", "dimmer", "dim", "down", "reduce")):
+            curr = get_brightness()
+            nm = _re.search(r'(\d+)', curr)
+            new_val = max(0, int(nm.group(1)) - 20) if nm else 40
+            return set_brightness(new_val)
+        return get_brightness()
+
+    def _handle_power(self, action: str, user_input: str) -> str:
+        import re as _re
+        from use_cases.system_queries import shutdown_system, restart_system
+        m = _re.search(r'\bin\s+(\d+)\s*(second|minute|min|sec)', user_input.lower())
+        delay = 0
+        if m:
+            val = int(m.group(1))
+            unit = m.group(2)
+            delay = val * 60 if "min" in unit else val
+        if action == "shutdown":
+            return shutdown_system(delay)
+        return restart_system(delay)
+
+    def _handle_window_focus(self, user_input: str) -> str:
+        from use_cases.system_queries import focus_window
+        import re as _re
+        # Extract what to focus
+        m = _re.search(r'(?:focus on|switch to window|bring up|focus window)\s+(.+)', user_input, _re.IGNORECASE)
+        fragment = m.group(1).strip() if m else user_input
+        return focus_window(fragment)
+
+    # ── Task management handlers ──────────────────────────────────
+
+    @property
+    def _task_mgr(self):
+        """Lazy-loaded TaskManager."""
+        from use_cases.tasks import TaskManager
+        if not hasattr(self, "_task_manager_instance"):
+            self._task_manager_instance = TaskManager(str(self.config.abs_memory_db_path))
+        return self._task_manager_instance
+
+    def _handle_task_add(self, user_input: str) -> str:
+        import re as _re
+        from use_cases.tasks import time_until_due
+        lower = user_input.lower()
+        # Strip trigger keyword from the front
+        title = user_input
+        for kw in _TASK_ADD_KEYWORDS:
+            idx = lower.find(kw)
+            if idx != -1:
+                title = user_input[idx + len(kw):].strip(" .:")
+                break
+        if not title:
+            return "What task would you like to add?"
+
+        # Priority extraction
+        priority = "normal"
+        if any(w in lower for w in ("urgent", "high priority", "asap", "important")):
+            priority = "high"
+        elif any(w in lower for w in ("low priority", "whenever", "someday")):
+            priority = "low"
+
+        # Due date extraction (simple ISO date or "tomorrow", "today")
+        due = None
+        if "tomorrow" in lower:
+            import datetime as _dt
+            due = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
+        elif "today" in lower:
+            import datetime as _dt
+            due = _dt.date.today().isoformat()
+        else:
+            m = _re.search(r'\b(\d{4}-\d{2}-\d{2})\b', user_input)
+            if m:
+                due = m.group(1)
+
+        # Strip the priority/due qualifiers from title
+        for noise in ("urgent", "high priority", "asap", "low priority", "whenever",
+                      "someday", "today", "tomorrow"):
+            title = _re.sub(rf'\b{noise}\b', '', title, flags=_re.IGNORECASE).strip()
+        title = title.strip(" ,.")
+        if not title:
+            return "What task would you like to add?"
+
+        task = self._task_mgr.add(title, due, priority)
+        due_str = f" (due: {due})" if due else ""
+        return f"Task #{task['id']} added: {task['title']}{due_str} [{task['priority']}]"
+
+    def _handle_task_list(self, user_input: str) -> str:
+        from use_cases.tasks import time_until_due
+        lower = user_input.lower()
+        show_all = any(w in lower for w in ("all", "completed", "done", "finished"))
+        tasks = self._task_mgr.list_all() if show_all else self._task_mgr.list_pending()
+        if not tasks:
+            return "No tasks found." if show_all else "You have no pending tasks."
+        lines = []
+        for t in tasks:
+            done = "[x]" if t["completed"] else "[ ]"
+            pri = f" [{t['priority']}]" if t["priority"] != "normal" else ""
+            due_str = f" — due: {time_until_due(t['due_date'])}" if t["due_date"] else ""
+            lines.append(f"  #{t['id']} {done}{pri} {t['title']}{due_str}")
+        label = "All tasks" if show_all else f"Pending tasks ({self._task_mgr.count_pending()})"
+        return f"{label}:\n" + "\n".join(lines)
+
+    def _handle_task_complete(self, user_input: str) -> str:
+        import re as _re
+        m = _re.search(r'#?(\d+)', user_input)
+        if not m:
+            return "Please specify the task ID, e.g. 'complete task #3'"
+        task_id = int(m.group(1))
+        task = self._task_mgr.complete(task_id)
+        if task is None:
+            return f"Task #{task_id} not found or already completed."
+        return f"Task #{task_id} marked as done: {task['title']}"
+
+    def _handle_task_remove(self, user_input: str) -> str:
+        import re as _re
+        m = _re.search(r'#?(\d+)', user_input)
+        if not m:
+            return "Please specify the task ID, e.g. 'remove task #2'"
+        task_id = int(m.group(1))
+        removed = self._task_mgr.remove(task_id)
+        return f"Task #{task_id} deleted." if removed else f"Task #{task_id} not found."
+
+    def _handle_task_clear(self) -> str:
+        count = self._task_mgr.clear_completed()
+        return f"Cleared {count} completed task(s)."
+
+    # ── Archive / file analysis handlers ─────────────────────────
+
+    def _handle_compress(self, user_input: str) -> str:
+        from use_cases.file_ops import compress_to_zip
+        filename, search_root = _parse_file_query(user_input)
+        if not filename:
+            return "Please specify a file or folder to compress, e.g. 'compress report.docx in Downloads'"
+        import os
+        from pathlib import Path
+        resolved = None
+        if os.path.isabs(filename) and os.path.exists(filename):
+            resolved = filename
+        elif search_root:
+            candidate = os.path.join(search_root, filename)
+            if os.path.exists(candidate):
+                resolved = candidate
+        if not resolved:
+            home = os.path.expanduser("~")
+            for root in [os.path.join(home, d) for d in ("Downloads", "Documents", "Desktop")]:
+                candidate = os.path.join(root, filename)
+                if os.path.exists(candidate):
+                    resolved = candidate
+                    break
+        if not resolved:
+            return f"'{filename}' was not found — please provide the full path."
+        return compress_to_zip([resolved])
+
+    def _handle_extract(self, user_input: str) -> str:
+        from use_cases.file_ops import extract_archive
+        filename, search_root = _parse_file_query(user_input)
+        if not filename:
+            return "Please specify an archive to extract, e.g. 'extract archive.zip from Downloads'"
+        import os
+        resolved = None
+        if os.path.isabs(filename) and os.path.exists(filename):
+            resolved = filename
+        elif search_root:
+            candidate = os.path.join(search_root, filename)
+            if os.path.exists(candidate):
+                resolved = candidate
+        if not resolved:
+            home = os.path.expanduser("~")
+            for root in [os.path.join(home, d) for d in ("Downloads", "Documents", "Desktop")]:
+                candidate = os.path.join(root, filename)
+                if os.path.exists(candidate):
+                    resolved = candidate
+                    break
+        if not resolved:
+            return f"'{filename}' was not found — please provide the full path."
+        return extract_archive(resolved)
+
+    def _handle_find_large_files(self, user_input: str) -> str:
+        import re as _re, os
+        from use_cases.file_ops import find_large_files
+        lower = user_input.lower()
+        home = os.path.expanduser("~")
+        root = None
+        for folder_kw, folder_path in [
+            ("downloads", os.path.join(home, "Downloads")),
+            ("documents", os.path.join(home, "Documents")),
+            ("desktop", os.path.join(home, "Desktop")),
+        ]:
+            if folder_kw in lower:
+                root = folder_path
+                break
+        min_mb = 100
+        m = _re.search(r'(\d+)\s*[mg]b', lower)
+        if m:
+            min_mb = int(m.group(1))
+        results = find_large_files(root, min_mb, 20)
+        if not results:
+            return f"No files larger than {min_mb} MB found."
+        lines = [f"Files larger than {min_mb} MB ({len(results)} found):"]
+        for f in results[:20]:
+            lines.append(f"  {f['size_human']:>8}  {f['path']}")
+        return "\n".join(lines)
+
+    def _handle_find_old_files(self, user_input: str) -> str:
+        import re as _re, os
+        from use_cases.file_ops import find_old_files
+        lower = user_input.lower()
+        days = 365
+        m = _re.search(r'(\d+)\s*(?:day|week|month|year)', lower)
+        if m:
+            val = int(m.group(1))
+            if "week" in lower:
+                days = val * 7
+            elif "month" in lower:
+                days = val * 30
+            elif "year" in lower:
+                days = val * 365
+            else:
+                days = val
+        results = find_old_files(None, days, 20)
+        if not results:
+            return f"No files older than {days} days found."
+        lines = [f"Files not modified in {days}+ days ({len(results)} found):"]
+        for f in results[:20]:
+            lines.append(f"  {f['last_modified']}  {f['path']}")
+        return "\n".join(lines)
+
+    def _handle_find_duplicates(self, user_input: str) -> str:
+        import os
+        from use_cases.file_ops import find_duplicate_files
+        lower = user_input.lower()
+        home = os.path.expanduser("~")
+        root = None
+        for folder_kw, folder_path in [
+            ("downloads", os.path.join(home, "Downloads")),
+            ("documents", os.path.join(home, "Documents")),
+            ("desktop", os.path.join(home, "Desktop")),
+        ]:
+            if folder_kw in lower:
+                root = folder_path
+                break
+        info = find_duplicate_files(root, 20)
+        if info["duplicate_groups"] == 0:
+            return "No duplicate files found."
+        lines = [
+            f"Found {info['duplicate_groups']} duplicate group(s). "
+            f"Wasted space: {info['wasted_space']}"
+        ]
+        for i, (h, paths) in enumerate(info["groups"].items()):
+            if i >= 10:
+                lines.append(f"  ... and {info['duplicate_groups']-10} more groups")
+                break
+            lines.append(f"\n  Group {i+1}:")
+            for p in paths:
+                lines.append(f"    • {p}")
+        return "\n".join(lines)
+
+    def _handle_grep(self, user_input: str) -> str:
+        from use_cases.file_analysis import grep_file
+        filename, search_root = _parse_file_query(user_input)
+        if not filename:
+            return "Please specify a file to search, e.g. 'search inside notes.txt for TODO'"
+        import re as _re, os
+        # Extract search pattern — text after "for" or "containing"
+        m = _re.search(r'(?:for|containing|pattern)\s+["\']?([^"\']+)["\']?', user_input, _re.IGNORECASE)
+        pattern = m.group(1).strip() if m else ""
+        if not pattern:
+            return "Please specify a search pattern, e.g. 'grep notes.txt for TODO'"
+        # Resolve file
+        resolved = None
+        if os.path.isabs(filename) and os.path.exists(filename):
+            resolved = filename
+        elif search_root:
+            candidate = os.path.join(search_root, filename)
+            if os.path.exists(candidate):
+                resolved = candidate
+        if not resolved:
+            home = os.path.expanduser("~")
+            for root in [os.path.join(home, d) for d in ("Downloads", "Documents", "Desktop")]:
+                candidate = os.path.join(root, filename)
+                if os.path.exists(candidate):
+                    resolved = candidate
+                    break
+        if not resolved:
+            return f"'{filename}' was not found."
+        return grep_file(resolved, pattern)
+
+    def _handle_diff(self, user_input: str) -> str:
+        from use_cases.file_analysis import diff_files
+        import re as _re
+        ext_pat = _ext_pattern()
+        files = _re.findall(ext_pat, user_input, _re.IGNORECASE)
+        if len(files) < 2:
+            return "Please specify two files to compare, e.g. 'diff report_v1.txt report_v2.txt'"
+        return diff_files(files[0], files[1])
+
+    def _handle_extract_patterns(self, user_input: str) -> str:
+        from use_cases.file_analysis import extract_patterns
+        filename, search_root = _parse_file_query(user_input)
+        if not filename:
+            return "Please specify a file, e.g. 'extract emails from contacts.txt'"
+        import os
+        resolved = None
+        if os.path.isabs(filename) and os.path.exists(filename):
+            resolved = filename
+        elif search_root:
+            candidate = os.path.join(search_root, filename)
+            if os.path.exists(candidate):
+                resolved = candidate
+        if not resolved:
+            home = os.path.expanduser("~")
+            for root in [os.path.join(home, d) for d in ("Downloads", "Documents", "Desktop")]:
+                candidate = os.path.join(root, filename)
+                if os.path.exists(candidate):
+                    resolved = candidate
+                    break
+        if not resolved:
+            return f"'{filename}' was not found."
+        lower = user_input.lower()
+        types = []
+        for pt in ("email", "url", "phone", "date", "ipv4"):
+            if pt in lower or (pt == "ip" and "ip" in lower):
+                types.append(pt)
+        result = extract_patterns(resolved, types or None)
+        summary = result.pop("_summary", "")
+        lines = [summary]
+        for ptype, matches in result.items():
+            if matches:
+                lines.append(f"\n{ptype.upper()}S ({len(matches)}):")
+                lines.extend(f"  {m}" for m in matches[:20])
+                if len(matches) > 20:
+                    lines.append(f"  ... and {len(matches)-20} more")
+        return "\n".join(lines)
+
     # ── Main Processing ──────────────────────────────────────────
 
     def _process(self, user_input: str) -> str:
@@ -656,6 +1515,22 @@ class EmberAgent:
         # Check for tool calls in response
         tool_calls_raw = self._extract_tool_calls(response)
         tool_calls_json = None
+
+        # If LLM returned a malformed tool call (e.g. params:"" instead of {}), recover it
+        if not tool_calls_raw and _looks_like_tool_call(response):
+            logger.warning("LLM returned malformed/bare tool call, attempting recovery: %r", response[:120])
+            tool_name_match = re.search(r'"tool"\s*:\s*"([^"]+)"', response)
+            if tool_name_match:
+                tool_name = tool_name_match.group(1)
+                if self.tools._tools.get(tool_name):
+                    result = self.tools.execute_tool(tool_name, {})
+                    response = str(result.result) if result.success else (
+                        "I encountered an issue with that request. Could you rephrase it?")
+                else:
+                    response = "I'm not sure how to help with that. Could you rephrase your question?"
+            else:
+                response = "I'm not sure how to help with that. Could you rephrase your question?"
+
         if tool_calls_raw:
             # Check if any tool call needs confirmation
             needs_confirm = self._check_destructive(tool_calls_raw, user_input)

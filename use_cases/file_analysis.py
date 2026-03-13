@@ -1,8 +1,10 @@
 """File attachment analysis for EmberOS-Windows."""
 
 import csv
+import difflib
 import io
 import logging
+import re
 import tarfile
 import xml.etree.ElementTree as ET
 import zipfile
@@ -110,52 +112,53 @@ def _read_xlsx(path: Path) -> str:
 
 
 def _read_pdf(path: Path) -> str:
-    # Try pdftotext first
-    import subprocess
+    """Extract text from PDF using pdfplumber (pure Python, self-contained)."""
     try:
-        result = subprocess.run(
-            ["pdftotext", str(path), "-"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            text = result.stdout
+        import pdfplumber
+        with pdfplumber.open(path) as pdf:
+            text = ""
+            for page in pdf.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + "\n"
+            text = text.strip()
             if len(text) > 6000:
                 return text[:6000] + "\n[... truncated]"
-            return text
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
+            return text if text else "PDF is empty or has no extractable text"
+    except ImportError:
+        return "PDF extraction requires pdfplumber (should be installed)"
+    except Exception as e:
+        return f"Error reading PDF: {e}"
 
-    # Fallback: try to extract text from raw PDF bytes
+
+def _read_pptx(path: Path, max_chars: int = 6000) -> str:
+    """Extract text from .pptx using pure zipfile + XML (no external deps)."""
     try:
-        raw = path.read_bytes()
-        text_parts = []
-        i = 0
-        while i < len(raw):
-            start = raw.find(b"(", i)
-            if start == -1:
-                break
-            end = raw.find(b")", start)
-            if end == -1:
-                break
-            chunk = raw[start + 1:end]
-            try:
-                decoded = chunk.decode("latin-1")
-                if len(decoded) > 2 and decoded.isprintable():
-                    text_parts.append(decoded)
-            except Exception:
-                pass
-            i = end + 1
-        if text_parts:
-            text = " ".join(text_parts)
-            if len(text) > 6000:
-                return text[:6000] + "\n[... truncated]"
-            return text
-    except Exception:
-        pass
+        import re
+        with zipfile.ZipFile(str(path), "r") as z:
+            slide_files = sorted(
+                [n for n in z.namelist() if n.startswith("ppt/slides/slide") and n.endswith(".xml")]
+            )
+            parts = []
+            for slide_name in slide_files:
+                xml_data = z.read(slide_name)
+                root = ET.fromstring(xml_data)
+                texts = []
+                for t in root.iter("{http://schemas.openxmlformats.org/drawingml/2006/main}t"):
+                    if t.text and t.text.strip():
+                        texts.append(t.text.strip())
+                if texts:
+                    parts.append(" ".join(texts))
+            text = "\n".join(parts).strip()
+            if not text:
+                return "Presentation has no extractable text"
+            return text[:max_chars] + "\n[... truncated]" if len(text) > max_chars else text
+    except Exception as e:
+        return f"Error reading .pptx: {e}"
 
-    return "PDF content could not be extracted \u2014 pdftotext not available"
+
+def _read_pptx_full(path: Path, max_chars: int = 25_000) -> str:
+    return _read_pptx(path, max_chars)
 
 
 def _read_archive(path: Path) -> str:
@@ -194,14 +197,242 @@ def read_attached_file(path: str) -> str:
         return _read_docx(p)
     elif ext == ".xlsx":
         return _read_xlsx(p)
+    elif ext == ".pptx":
+        return _read_pptx(p)
     elif ext in _IMAGE_EXTENSIONS:
-        return f"[Image file: {p.name}, {size} bytes \u2014 vision analysis not available in this version]"
+        return f"[Image file: {p.name}, {size} bytes — vision analysis not available in this version]"
     elif ext in (".zip", ".tar", ".gz", ".bz2", ".tgz", ".7z"):
         if ext == ".7z":
-            return f"[7z archive: {p.name} \u2014 extraction requires 7-Zip]"
+            return f"[7z archive: {p.name} — extraction requires 7-Zip]"
         return _read_archive(p)
     else:
-        return f"[Binary file: {p.name} \u2014 cannot analyze content]"
+        return f"[Binary file: {p.name} — cannot analyze content]"
+
+
+def _read_full(path: Path, max_chars: int = 25_000) -> str:
+    """Read as much of a file as possible for summarization purposes."""
+    ext = path.suffix.lower()
+    if ext == ".csv":
+        return _read_csv_file(path)
+    if ext in _TEXT_EXTENSIONS:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            return text[:max_chars] if len(text) > max_chars else text
+        except Exception as e:
+            return f"Error reading: {e}"
+    if ext == ".pdf":
+        return _read_pdf_full(path, max_chars)
+    if ext == ".docx":
+        return _read_docx_full(path, max_chars)
+    if ext == ".xlsx":
+        return _read_xlsx(path)
+    if ext == ".pptx":
+        return _read_pptx_full(path, max_chars)
+    return ""
+
+
+def _read_pdf_full(path: Path, max_chars: int = 25_000) -> str:
+    """Extract text from PDF with a larger character budget using pdfplumber."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(path) as pdf:
+            text = ""
+            for page in pdf.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + "\n"
+            text = text.strip()
+            return text[:max_chars] if len(text) > max_chars else text
+    except ImportError:
+        return "PDF extraction requires pdfplumber"
+    except Exception as e:
+        return f"Error reading PDF: {e}"
+
+
+def _read_docx_full(path: Path, max_chars: int = 25_000) -> str:
+    """Extract text from .docx with a larger character budget."""
+    try:
+        with zipfile.ZipFile(str(path), "r") as z:
+            if "word/document.xml" not in z.namelist():
+                return "Could not find document.xml in .docx"
+            xml_data = z.read("word/document.xml")
+        root = ET.fromstring(xml_data)
+        paragraphs = []
+        for para in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
+            texts = []
+            for t in para.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"):
+                if t.text:
+                    texts.append(t.text)
+            if texts:
+                paragraphs.append("".join(texts))
+        text = "\n".join(paragraphs)
+        return text[:max_chars] if len(text) > max_chars else text or "Empty document"
+    except Exception as e:
+        return f"Error reading .docx: {e}"
+
+
+def _sample_for_llm(content: str, budget: int = 3_400) -> tuple[str, bool]:
+    """Return (snippet, was_sampled).
+
+    If content fits in budget, returns it whole.
+    Otherwise samples start (60%) + middle (25%) + end (15%) so the LLM
+    sees representative sections across the entire document.
+    """
+    if len(content) <= budget:
+        return content, False
+
+    start_n  = int(budget * 0.60)
+    mid_n    = int(budget * 0.25)
+    end_n    = budget - start_n - mid_n
+
+    start  = content[:start_n]
+    mid_off = max(start_n, len(content) // 2 - mid_n // 2)
+    middle = content[mid_off: mid_off + mid_n]
+    end    = content[-end_n:] if end_n > 0 else ""
+
+    sampled = (
+        start
+        + f"\n\n[— middle section —]\n\n"
+        + middle
+        + (f"\n\n[— near end —]\n\n" + end if end else "")
+    )
+    return sampled, True
+
+
+def _extractive_summary(content: str, max_sentences: int = 5) -> str:
+    """Generate a simple extractive summary by selecting key sentences."""
+    # Fast preprocessing: normalize whitespace and remove line breaks
+    normalized = " ".join(content.split())
+
+    # Split into sentences more carefully
+    sentences = []
+    current = ""
+    for char in normalized:
+        current += char
+        if char in '.!?' and len(current.split()) > 3:
+            sentences.append(current.strip())
+            current = ""
+
+    if current.strip() and len(current.split()) > 3:
+        sentences.append(current.strip())
+
+    if not sentences:
+        return content[:400]
+
+    # Select diverse sentences: start, middle, end
+    summary_sentences = []
+
+    # First 1-2 sentences
+    summary_sentences.extend(sentences[:min(2, len(sentences))])
+
+    # Middle sentence if document is long
+    if len(sentences) > 15:
+        mid_idx = len(sentences) // 2
+        summary_sentences.append(sentences[mid_idx])
+
+    # Last sentence (often conclusions)
+    if len(sentences) > 5:
+        summary_sentences.append(sentences[-1])
+
+    return " ".join(summary_sentences)
+
+
+def summarize_file(path: str, llm_client=None) -> str:
+    """Read a file at the given path and return a paragraph summary."""
+    p = Path(path)
+    if not p.exists():
+        return None  # caller handles "not found"
+
+    content = _read_full(p)
+
+    if not content:
+        return f"The file {p.name} appears to be empty."
+    if content.startswith("[Binary") or content.startswith("[Image"):
+        return f"Cannot extract text from {p.name} — binary/image file."
+    if content.startswith("Error reading PDF"):
+        return f"Could not extract text from {p.name}: {content}"
+    if content.startswith("Error reading"):
+        return content
+
+    size = p.stat().st_size
+    size_str = f"{size // 1024} KB" if size >= 1024 else f"{size} B"
+    word_count = len(content.split())
+
+    # Very short — just show it
+    if len(content) <= 400:
+        return f"{p.name} ({size_str}):\n\n{content}"
+
+    header = f"{p.name}  ({size_str}, ~{word_count:,} words)"
+
+    if llm_client:
+        snippet, was_sampled = _sample_for_llm(content, budget=3_400)
+        size_note = (
+            f"Note: this is a {word_count:,}-word document. "
+            "The sample below covers the start, a middle section, and the end.\n\n"
+            if was_sampled else ""
+        )
+        prompt = (
+            f"{size_note}"
+            f"Write a concise summary paragraph of this document. "
+            f"Describe what it covers, its main points, and any notable details.\n\n"
+            f"File: {p.name}\n\n{snippet}"
+        )
+        try:
+            summary = llm_client.chat([
+                {"role": "system",
+                 "content": "You are a document summarizer. Reply with one clear summary paragraph only — no preamble, no bullet points."},
+                {"role": "user", "content": prompt},
+            ])
+            return f"{header}\n\n{summary.strip()}"
+        except Exception:
+            pass
+
+    # Fallback: clean text preview (no LLM needed)
+    lines = [l.rstrip() for l in content.split("\n") if l.strip()]
+    preview = "\n".join(lines[:20])
+    return (
+        f"{header}\n\nContent Preview:\n{preview}"
+        + ("\n\n[... truncated]" if len(lines) > 20 else "")
+    )
+
+
+def find_similar_files(filename: str, search_roots: list = None) -> list:
+    """Return up to 3 files whose names closely match `filename`."""
+    import difflib
+
+    stem = Path(filename).stem.lower()
+    ext  = Path(filename).suffix.lower()
+
+    if not search_roots:
+        home = Path.home()
+        search_roots = [
+            home / "Desktop", home / "Downloads", home / "Documents",
+            home / "Pictures", home / "Videos", home,
+        ]
+    else:
+        search_roots = [Path(r) for r in search_roots]
+
+    candidates = []
+    pattern = f"*{ext}" if ext else "*"
+    for root in search_roots:
+        if not root.exists():
+            continue
+        try:
+            for p in root.rglob(pattern):
+                candidates.append(p)
+                if len(candidates) >= 300:
+                    break
+        except (PermissionError, OSError):
+            pass
+        if len(candidates) >= 300:
+            break
+
+    scored = [
+        (difflib.SequenceMatcher(None, stem, c.stem.lower()).ratio(), c)
+        for c in candidates
+    ]
+    scored.sort(key=lambda x: -x[0])
+    return [str(c) for score, c in scored[:3] if score >= 0.4]
 
 
 def analyze_attached_files(file_paths: list[str], user_message: str,
@@ -234,3 +465,104 @@ def analyze_attached_files(file_paths: list[str], user_message: str,
             return f"Analysis error: {e}\n\nRaw file contents:\n{combined}"
 
     return combined
+
+
+# ---------------------------------------------------------------------------
+# Content search / diff / pattern extraction
+# ---------------------------------------------------------------------------
+
+def grep_file(path: str, pattern: str, context_lines: int = 2,
+              case_sensitive: bool = False) -> str:
+    """Search for a pattern inside a text file and return matching lines with context."""
+    p = Path(path)
+    if not p.exists():
+        return f"File not found: {path}"
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return f"Could not read file: {e}"
+
+    lines = text.splitlines()
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        rx = re.compile(pattern, flags)
+    except re.error as e:
+        return f"Invalid pattern: {e}"
+
+    hits = []
+    for i, line in enumerate(lines):
+        if rx.search(line):
+            start = max(0, i - context_lines)
+            end   = min(len(lines), i + context_lines + 1)
+            block = []
+            for j in range(start, end):
+                prefix = ">> " if j == i else "   "
+                block.append(f"{j+1:4d}{prefix}{lines[j]}")
+            hits.append("\n".join(block))
+        if len(hits) >= 50:
+            hits.append("[... more matches truncated]")
+            break
+
+    if not hits:
+        return f"No matches for '{pattern}' in {p.name}."
+    header = f"{len(hits)} match(es) for '{pattern}' in {p.name}:\n"
+    return header + "\n---\n".join(hits)
+
+
+def diff_files(path_a: str, path_b: str) -> str:
+    """Show a unified diff between two text files."""
+    pa, pb = Path(path_a), Path(path_b)
+    for p in (pa, pb):
+        if not p.exists():
+            return f"File not found: {p}"
+
+    try:
+        lines_a = pa.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        lines_b = pb.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    except Exception as e:
+        return f"Could not read files: {e}"
+
+    diff = list(difflib.unified_diff(
+        lines_a, lines_b,
+        fromfile=pa.name, tofile=pb.name,
+        n=3,
+    ))
+    if not diff:
+        return f"Files are identical: {pa.name} and {pb.name}"
+    result = "".join(diff)
+    if len(result) > 8000:
+        result = result[:8000] + "\n[... diff truncated]"
+    return result
+
+
+_PATTERN_REGEXES = {
+    "email":   r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+    "url":     r"https?://[^\s\"'<>]+",
+    "phone":   r"(?:\+?\d[\d\s\-\(\)]{7,}\d)",
+    "date":    r"\b(?:\d{4}[-/]\d{2}[-/]\d{2}|\d{2}[-/]\d{2}[-/]\d{4})\b",
+    "ipv4":    r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+}
+
+
+def extract_patterns(path: str, pattern_types: list[str] = None) -> dict:
+    """Extract emails, URLs, phone numbers, dates, IPs from a text file."""
+    p = Path(path)
+    if not p.exists():
+        return {"error": f"File not found: {path}"}
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return {"error": f"Could not read file: {e}"}
+
+    types_to_check = pattern_types or list(_PATTERN_REGEXES.keys())
+    results = {}
+    for pt in types_to_check:
+        rx_str = _PATTERN_REGEXES.get(pt)
+        if not rx_str:
+            continue
+        matches = list(dict.fromkeys(re.findall(rx_str, text, re.IGNORECASE)))
+        results[pt] = matches[:100]
+
+    total = sum(len(v) for v in results.values())
+    results["_summary"] = f"Found {total} pattern(s) across {len(results)-1} type(s) in {p.name}."
+    return results
