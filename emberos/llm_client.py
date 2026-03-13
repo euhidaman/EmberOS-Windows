@@ -14,10 +14,12 @@ class LLMClient:
     """Wrapper around the local BitNet server's OpenAI-compatible chat API."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8765,
-                 temperature: float = 0.7, max_tokens: int = 512):
+                 temperature: float = 0.7, max_tokens: int = 512,
+                 timeout: int = 300):
         self.base_url = f"http://{host}:{port}"
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.timeout = timeout
         self._session = requests.Session()
 
     def _url(self, path: str) -> str:
@@ -39,7 +41,7 @@ class LLMClient:
                 resp = self._session.post(
                     self._url("/v1/chat/completions"),
                     json=payload,
-                    timeout=120,
+                    timeout=self.timeout,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -74,7 +76,7 @@ class LLMClient:
             resp = self._session.post(
                 self._url("/v1/chat/completions"),
                 json=payload,
-                timeout=120,
+                timeout=self.timeout,
                 stream=True,
             )
             resp.raise_for_status()

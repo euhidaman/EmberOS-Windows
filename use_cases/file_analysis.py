@@ -122,8 +122,8 @@ def _read_pdf(path: Path) -> str:
                 if extracted:
                     text += extracted + "\n"
             text = text.strip()
-            if len(text) > 6000:
-                return text[:6000] + "\n[... truncated]"
+            if len(text) > 15000:
+                return text[:15000] + "\n[... truncated]"
             return text if text else "PDF is empty or has no extractable text"
     except ImportError:
         return "PDF extraction requires pdfplumber (should be installed)"
@@ -566,3 +566,237 @@ def extract_patterns(path: str, pattern_types: list[str] = None) -> dict:
     total = sum(len(v) for v in results.values())
     results["_summary"] = f"Found {total} pattern(s) across {len(results)-1} type(s) in {p.name}."
     return results
+
+
+# ---------------------------------------------------------------------------
+# Batch folder reading and folder description
+# ---------------------------------------------------------------------------
+
+_READABLE_EXTENSIONS = _TEXT_EXTENSIONS | {
+    ".pdf", ".docx", ".xlsx", ".pptx", ".csv",
+}
+
+
+def batch_read_folder(folder: str, extensions: list = None,
+                      max_chars_per_file: int = 4000,
+                      max_total_chars: int = 40000) -> dict:
+    """Read all readable documents in a folder.
+
+    Returns:
+        {"files": [{"name": str, "text": str}], "total_files": int,
+         "skipped": [str], "total_chars": int}
+    Only processes files at the top level of the folder (no recursion),
+    to keep results focused.
+    """
+    root = Path(folder)
+    if not root.exists():
+        return {"error": f"Not found: {folder}"}
+    if not root.is_dir():
+        return {"error": f"Not a directory: {folder}"}
+
+    filter_exts = _READABLE_EXTENSIONS
+    if extensions:
+        filter_exts = {f".{e.lstrip('.')}" for e in extensions}
+
+    files_out = []
+    skipped = []
+    total_chars = 0
+
+    for p in sorted(root.iterdir()):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in filter_exts:
+            skipped.append(p.name)
+            continue
+        if total_chars >= max_total_chars:
+            skipped.append(f"{p.name} (budget exhausted)")
+            continue
+        try:
+            text = _read_full(p, max_chars=max_chars_per_file)
+        except Exception as e:
+            skipped.append(f"{p.name} (read error: {e})")
+            continue
+        if not text or text.startswith("[Binary") or text.startswith("[Image"):
+            skipped.append(f"{p.name} (not readable)")
+            continue
+        remaining = max_total_chars - total_chars
+        if len(text) > remaining:
+            text = text[:remaining] + "\n[... truncated]"
+        files_out.append({"name": p.name, "text": text})
+        total_chars += len(text)
+
+    return {
+        "files": files_out,
+        "total_files": len(files_out),
+        "skipped": skipped,
+        "total_chars": total_chars,
+    }
+
+
+def folder_explain(folder: str) -> dict:
+    """Describe what a folder contains: file counts by type, total size, largest files."""
+    root = Path(folder)
+    if not root.exists():
+        return {"error": f"Not found: {folder}"}
+    if not root.is_dir():
+        return {"error": f"Not a directory: {folder}"}
+
+    _type_map = {
+        "PDF": {".pdf"},
+        "Documents": {".docx", ".doc", ".odt", ".rtf", ".txt", ".md"},
+        "Spreadsheets": {".xlsx", ".xls", ".csv", ".ods"},
+        "Presentations": {".pptx", ".ppt"},
+        "Images": {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp", ".tiff"},
+        "Code": {".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".rs",
+                 ".go", ".html", ".css", ".sh", ".rb", ".ps1", ".bat"},
+        "Archives": {".zip", ".tar", ".gz", ".bz2", ".7z", ".rar"},
+        "Videos": {".mp4", ".mkv", ".avi", ".mov", ".wmv"},
+        "Audio": {".mp3", ".wav", ".flac", ".aac", ".ogg"},
+    }
+
+    counts: dict[str, int] = {}
+    total_size = 0
+    file_list = []
+
+    try:
+        for p in root.iterdir():
+            if not p.is_file():
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            total_size += size
+            ext = p.suffix.lower()
+            category = "Other"
+            for cat, exts in _type_map.items():
+                if ext in exts:
+                    category = cat
+                    break
+            counts[category] = counts.get(category, 0) + 1
+            file_list.append({"name": p.name, "size": size, "category": category})
+    except PermissionError as e:
+        return {"error": f"Permission denied: {e}"}
+
+    file_list.sort(key=lambda x: -x["size"])
+
+    def _hsize(b: int) -> str:
+        if b < 1024:
+            return f"{b} B"
+        if b < 1024 * 1024:
+            return f"{b / 1024:.1f} KB"
+        return f"{b / (1024 * 1024):.1f} MB"
+
+    return {
+        "folder": folder,
+        "total_files": len(file_list),
+        "total_size": _hsize(total_size),
+        "by_type": counts,
+        "largest_files": [
+            {"name": f["name"], "size": _hsize(f["size"])}
+            for f in file_list[:5]
+        ],
+    }
+
+
+def grep_folder(folder: str, pattern: str, extensions: list = None,
+                case_sensitive: bool = False, max_files: int = 50,
+                max_snippets_per_file: int = 3) -> dict:
+    """Search for text or a regex pattern across all readable files in a folder.
+
+    Only searches top-level files (no recursion), consistent with batch_read_folder.
+    Extracts text from PDFs, DOCX, TXT, CSV, XLSX, PPTX etc. before searching.
+
+    Returns:
+        {
+            "matches": [{"path": str, "name": str, "snippets": [str, ...]}],
+            "searched": int,   # files examined (text extracted + searched)
+            "matched": int,    # files that contained at least one match
+        }
+    On folder error: {"error": str, "matches": [], "searched": 0, "matched": 0}
+    """
+    import re
+
+    root = Path(folder)
+    if not root.exists():
+        return {
+            "error": f"Folder not found: {folder}",
+            "matches": [], "searched": 0, "matched": 0,
+        }
+    if not root.is_dir():
+        return {
+            "error": f"Not a directory: {folder}",
+            "matches": [], "searched": 0, "matched": 0,
+        }
+
+    # Resolve extension filter
+    if extensions:
+        ext_set = {("." + e.lstrip(".")).lower() for e in extensions}
+    else:
+        ext_set = _READABLE_EXTENSIONS
+
+    # Compile search regex; treat the pattern as a literal if it is not valid regex
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        compiled = re.compile(pattern, flags)
+    except re.error:
+        compiled = re.compile(re.escape(pattern), flags)
+
+    # Collect candidate files sorted alphabetically for deterministic results
+    candidates = sorted(
+        (p for p in root.iterdir() if p.is_file() and p.suffix.lower() in ext_set),
+        key=lambda p: p.name.lower(),
+    )
+
+    searched = 0
+    matches = []
+
+    for p in candidates[:max_files]:
+        # Extract readable text from the file
+        try:
+            text = _read_full(p, max_chars=20000)
+        except Exception:
+            continue
+
+        # Skip files whose text extraction failed or returned a non-text sentinel
+        if not text:
+            continue
+        text_lower = text[:60].lower()
+        if (text_lower.startswith("[binary")
+                or text_lower.startswith("[image")
+                or text_lower.startswith("error reading")):
+            continue
+
+        searched += 1
+
+        # Search line-by-line to collect context snippets
+        lines = text.splitlines()
+        snippets: list[str] = []
+
+        for i, line in enumerate(lines):
+            if not compiled.search(line):
+                continue
+            # Build a short snippet: one line of context before and after the match
+            start = max(0, i - 1)
+            end = min(len(lines), i + 2)
+            snippet_parts = [ln.strip() for ln in lines[start:end] if ln.strip()]
+            snippet = " … ".join(snippet_parts)
+            if len(snippet) > 220:
+                snippet = snippet[:220] + "…"
+            if snippet:
+                snippets.append(snippet)
+            if len(snippets) >= max_snippets_per_file:
+                break
+
+        if snippets:
+            matches.append({
+                "path": str(p),
+                "name": p.name,
+                "snippets": snippets,
+            })
+
+    return {
+        "matches": matches,
+        "searched": searched,
+        "matched": len(matches),
+    }

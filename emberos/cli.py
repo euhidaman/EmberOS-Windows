@@ -116,7 +116,7 @@ def query_cmd(text):
     console = Console()
     base = _api_base()
     try:
-        resp = requests.post(f"{base}/query", json={"input": text}, timeout=120)
+        resp = requests.post(f"{base}/query", json={"input": text}, timeout=600)
         if resp.status_code == 200:
             answer = resp.json().get("response", "(no response)")
             console.print(Panel(answer, border_style=EMBER_SUCCESS, padding=(0, 1)))
@@ -627,7 +627,7 @@ def _do_query(console, base: str, user_input: str):
             resp = requests.post(
                 f"{base}/query",
                 json={"input": user_input},
-                timeout=300,
+                timeout=600,
             )
             if resp.status_code == 200:
                 result["ok"] = resp.json().get("response", "(no response)")

@@ -148,6 +148,89 @@ _EXTRACT_PATTERNS_KEYWORDS = ("extract emails", "find emails", "extract urls", "
                                 "find phone numbers", "extract phone", "extract dates from",
                                 "extract ips", "extract patterns")
 
+_CONTENT_SEARCH_KEYWORDS = (
+    "find documents mentioning", "find files mentioning",
+    "find documents containing", "find files containing",
+    "find files that contain", "find documents that contain",
+    "search for text in folder", "search inside all",
+    "search documents for", "search files for",
+    "find documents that mention", "which files mention",
+    "which documents contain", "which files contain",
+    "look for text in", "scan folder for",
+)
+
+_BATCH_DELETE_KEYWORDS = (
+    "delete those files", "delete all of them", "delete these files",
+    "remove those files", "remove all of them", "remove these files",
+    "delete them all", "remove them all", "delete the found files",
+    "delete all those", "delete all these", "purge those files",
+    "purge these files", "purge them", "delete the results",
+    "delete the matches",
+)
+
+# ── Multi-document / synthesis keywords ──────────────────────────────────────
+
+_LIST_DIR_KEYWORDS = (
+    "list files in", "list the files in", "show files in", "what files are in",
+    "what's in the folder", "show me the files in", "list directory",
+    "show the contents of", "what is in the folder", "files in the",
+    "what documents are in", "show folder contents",
+)
+
+_FOLDER_READ_KEYWORDS = (
+    "go through all", "read all", "summarize all", "summarize every",
+    "summarize all documents", "summarize all files", "summarize everything in",
+    "process all", "analyze all", "go through the files", "go through the documents",
+    "extract from all", "read all the documents", "read all the files",
+    "create a knowledge summary", "build a study guide", "study guide from",
+    "knowledge summary from",
+)
+
+_MULTI_DOC_COMPARE_KEYWORDS = (
+    "compare these documents", "compare the documents", "compare these files",
+    "compare all files", "compare all documents", "comparison of documents",
+    "compare documents in", "compare files in", "create a comparison report",
+    "comparison report",
+)
+
+_CREATE_DOC_KEYWORDS = (
+    "create a document", "create a report", "create a summary document",
+    "create a pdf", "create a markdown", "create a txt", "create a docx",
+    "generate a document", "generate a report", "write a document",
+    "write a report", "save this as a document", "save the summary",
+    "save that as a", "create a combined", "create an analysis",
+    "build a report", "build a document", "compile a report",
+    "make a report", "make a document", "convert that to a",
+    "create a short summary", "create a full report", "create an executive summary",
+    "create a structured", "create a professional report",
+)
+
+_FOLDER_EXPLAIN_KEYWORDS = (
+    "what does this folder contain", "what is in this folder",
+    "explain this folder", "what's in this directory", "describe this folder",
+    "folder overview", "what kinds of files", "folder summary",
+    "what's in the directory", "explain the folder", "overview of the folder",
+    "what does the folder contain", "what does the directory contain",
+    "project folder contains", "what this folder contains",
+)
+
+_DOC_QA_KEYWORDS = (
+    "what does the report say about", "what does the document say about",
+    "which document mentions", "which document contains",
+    "what does it say about", "find information about in the documents",
+    "search the documents for", "what was mentioned about",
+    "any mention of in the documents",
+)
+
+_FOLDER_TOPICS_KEYWORDS = (
+    "key topics across", "common topics in the", "recurring topics",
+    "what information appears in most", "topics across",
+    "main subjects across", "main themes across", "what are the themes in the",
+    "important information across", "identify related documents",
+    "detect repeated information", "what's repeated across",
+    "group related documents",
+)
+
 # ── Known file extensions for query parsing ──────────────────────────────────
 _KNOWN_EXTENSIONS = (
     "pdf", "docx", "xlsx", "pptx", "txt", "md", "csv",
@@ -166,7 +249,7 @@ _IDENTITY_KEYWORDS = (
     "your name", "are you an ai", "are you a bot",
 )
 _GREETING_KEYWORDS = (
-    "hello", "hi!", "hi there", "hey!", "hey there",
+    "hello", "hi", "hi!", "hi there", "hey", "hey!", "hey there",
     "good morning", "good evening", "good afternoon", "howdy",
 )
 
@@ -325,6 +408,17 @@ class EmberAgent:
         # Interrupt / confirmation state
         self.interrupt_flag = False
         self.pending_confirmation: Optional[dict] = None
+        self.pending_clarification: Optional[dict] = None
+
+        # Conversation context: tracks last folder, files, and document text
+        # so follow-up commands like "what's in that document" resolve correctly.
+        self._ctx: dict = {
+            "last_dir": None,
+            "last_files": [],
+            "last_doc_text": "",
+            "last_summary": "",
+            "last_output_path": None,
+        }
 
         self._server_started = False
 
@@ -470,6 +564,24 @@ class EmberAgent:
             elif act == "run_shell":
                 result = self.tools.execute_tool("run_shell", {"cmd": params["cmd"]})
                 return result.result if result.success else f"Error: {result.error}"
+            elif act == "batch_delete":
+                from use_cases.file_ops import delete_file
+                paths = params.get("paths", [])
+                if not paths:
+                    return "No files to delete."
+                results = []
+                for path in paths:
+                    if self.interrupt_flag:
+                        self.interrupt_flag = False
+                        results.append("Interrupted.")
+                        break
+                    try:
+                        msg = delete_file(path, snapshot_mgr=self.snapshot_mgr)
+                        results.append(msg)
+                    except Exception as e:
+                        results.append(f"Failed to delete {path}: {e}")
+                self._ctx["last_files"] = []
+                return "\n".join(results) if results else "No files were deleted."
             else:
                 return f"Unknown confirmed action: {act}"
         except Exception as e:
@@ -521,9 +633,19 @@ class EmberAgent:
         if file_org is not None:
             return file_org
 
+        # "what is in my ResearchPapers folder" → directory listing, not file summarize
+        if "folder" in lower and any(kw in lower for kw in _FILE_SUMMARIZE_KEYWORDS):
+            return self._handle_list_dir(user_input)
+
         # File summarization ("what's in X.pdf", "summarize report.docx in E:\Quant")
         if any(kw in lower for kw in _FILE_SUMMARIZE_KEYWORDS):
             result = self._handle_file_summarize(user_input)
+            if result is not None:
+                return result
+
+        # Batch delete from context ("delete those files", "remove all of them")
+        if any(kw in lower for kw in _BATCH_DELETE_KEYWORDS):
+            result = self._handle_batch_delete(user_input)
             if result is not None:
                 return result
 
@@ -619,6 +741,10 @@ class EmberAgent:
         if any(kw in lower for kw in _FIND_DUPES_KEYWORDS):
             return self._handle_find_duplicates(user_input)
 
+        # Content search across folder ("find files containing X in Invoices")
+        if any(kw in lower for kw in _CONTENT_SEARCH_KEYWORDS):
+            return self._handle_content_search(user_input)
+
         # Content search / analysis
         if any(kw in lower for kw in _GREP_KEYWORDS):
             return self._handle_grep(user_input)
@@ -626,6 +752,30 @@ class EmberAgent:
             return self._handle_diff(user_input)
         if any(kw in lower for kw in _EXTRACT_PATTERNS_KEYWORDS):
             return self._handle_extract_patterns(user_input)
+
+        # Directory listing with context tracking
+        if any(kw in lower for kw in _LIST_DIR_KEYWORDS):
+            return self._handle_list_dir(user_input)
+
+        # Folder-level document workflows
+        if any(kw in lower for kw in _FOLDER_EXPLAIN_KEYWORDS):
+            return self._handle_folder_explain(user_input)
+        if any(kw in lower for kw in _FOLDER_READ_KEYWORDS):
+            return self._handle_folder_docs_request(user_input)
+        if any(kw in lower for kw in _MULTI_DOC_COMPARE_KEYWORDS):
+            return self._handle_multi_doc_compare(user_input)
+        if any(kw in lower for kw in _FOLDER_TOPICS_KEYWORDS):
+            return self._handle_folder_topics(user_input)
+
+        # Document creation with clarification flow
+        if any(kw in lower for kw in _CREATE_DOC_KEYWORDS):
+            return self._handle_create_doc(user_input)
+
+        # Document QA against loaded context
+        if any(kw in lower for kw in _DOC_QA_KEYWORDS):
+            result = self._handle_doc_qa(user_input)
+            if result is not None:
+                return result
 
         return None
 
@@ -684,7 +834,7 @@ class EmberAgent:
                 msg += "\n\nDid you mean:\n" + "\n".join(names)
             return msg
 
-        # --- Case 3: no location given — search default locations ---
+        # --- Case 3: no location given — search last_dir context, then default locations ---
         home = os.path.expanduser("~")
         default_roots = [
             os.path.join(home, "Desktop"),
@@ -694,6 +844,10 @@ class EmberAgent:
             os.path.join(home, "Videos"),
             home,
         ]
+        # Prioritise the last folder the user was working in
+        ctx_dir = self._ctx.get("last_dir")
+        if ctx_dir and ctx_dir not in default_roots:
+            default_roots = [ctx_dir] + default_roots
         for root in default_roots:
             p = Path(root) / filename
             result = summarize_file(str(p), llm_client=self.llm)
@@ -718,6 +872,36 @@ class EmberAgent:
         else:
             msg += "\nMake sure the file exists and try specifying the folder, e.g.:\n  what's in report.pdf in downloads"
         return msg
+
+    def _handle_batch_delete(self, user_input: str) -> Optional[str]:
+        """Delete all files from the previous content search result, with confirmation."""
+        files = self._ctx.get("last_files", [])
+        if not files:
+            return (
+                "No files in context to delete. "
+                "First run a content search, e.g. "
+                "'find files containing \"password\" in Documents'"
+            )
+
+        import os
+        # Filter to only existing files
+        existing = [f for f in files if os.path.isfile(f)]
+        if not existing:
+            return "The files from the previous search no longer exist."
+
+        lines = [f"About to delete {len(existing)} file(s):"]
+        for p in existing:
+            lines.append(f"  • {os.path.basename(p)}  ({p})")
+        lines.append("\nThis will create snapshots before deletion.")
+        lines.append("Type 'yes' to confirm, or 'no' to cancel.")
+        preview = "\n".join(lines)
+
+        self.pending_confirmation = {
+            "action": "batch_delete",
+            "params": {"paths": existing},
+            "preview": preview,
+        }
+        return preview
 
     def _handle_file_delete(self, user_input: str) -> Optional[str]:
         """Find a file from a natural-language description and prompt for confirmation before deleting."""
@@ -793,7 +977,11 @@ class EmberAgent:
             "I can help with:\n"
             "  • File management — find, organize, move, copy, delete, compress, extract files\n"
             "  • File analysis — read/summarize PDF, DOCX, XLSX, PPTX, CSV, TXT and more\n"
+            "  • Multi-document workflows — summarize/compare all documents in a folder,\n"
+            "    extract key topics, build knowledge summaries, create combined reports\n"
+            "  • Document creation — write results to TXT, Markdown, PDF, or DOCX files\n"
             "  • Content search — grep files, diff two files, extract emails/URLs/phone numbers\n"
+            "  • Contextual navigation — 'what is in the energy doc in there?' uses folder context\n"
             "  • System info — disk, RAM, CPU, processes, uptime, battery\n"
             "  • System control — volume, brightness, dark mode, lock, sleep, shutdown, restart\n"
             "  • Window management — list open windows, minimize all, focus a window\n"
@@ -1039,6 +1227,11 @@ class EmberAgent:
             type_desc = f" {file_type}" if file_type else ""
             q_desc = f" named '{query}'" if query else ""
             return f"No{type_desc} files{q_desc} found in {root_desc}."
+
+        # Store context for follow-up queries
+        if search_root:
+            self._ctx["last_dir"] = search_root
+        self._ctx["last_files"] = results[:20]
 
         lines = [f"Found {len(results)} file(s):"]
         for path in results[:20]:
@@ -1430,6 +1623,103 @@ class EmberAgent:
             return f"'{filename}' was not found."
         return grep_file(resolved, pattern)
 
+    def _handle_content_search(self, user_input: str) -> str:
+        """Search for a text pattern across all readable files in a folder."""
+        from use_cases.file_analysis import grep_folder, _read_full
+        import re as _re, os
+        from pathlib import Path
+
+        lower = user_input.lower()
+
+        # --- Extract the search pattern ---
+        # Try quoted string first: "Alexandre Inc", 'password'
+        quoted_m = _re.search(r'["\']([^"\']+)["\']', user_input)
+        if quoted_m:
+            pattern = quoted_m.group(1).strip()
+        else:
+            # Try: "mentioning X", "containing X", "for X", "about X"
+            kw_m = _re.search(
+                r'\b(?:mentioning|containing|mention|contain|for|about|'
+                r'with|including|that include|that say|that have|with text|'
+                r'with content|the word|the phrase)\s+(.+?)(?:\s+in\s+|\s+from\s+|$)',
+                lower, _re.IGNORECASE,
+            )
+            if kw_m:
+                pattern = kw_m.group(1).strip().strip('"\'')
+            else:
+                # Last resort: text at the end of the sentence after last keyword
+                parts = _re.split(
+                    r'\b(?:mentioning|containing|mention|contain)\b', lower, maxsplit=1
+                )
+                if len(parts) > 1:
+                    pattern = parts[1].strip().split(" in ")[0].strip()
+                else:
+                    return (
+                        "Please specify what to search for. "
+                        "Example: find files containing \"password\" in Documents"
+                    )
+
+        if not pattern:
+            return (
+                "Please specify what to search for. "
+                "Example: find documents mentioning \"Alexandre Inc\" in Invoices"
+            )
+
+        # --- Resolve the folder ---
+        folder = self._resolve_folder_from_text(lower, user_input)
+        if not folder:
+            # Default to current context folder or Documents
+            folder = self._ctx.get("last_dir") or os.path.join(os.path.expanduser("~"), "Documents")
+
+        if not os.path.isdir(folder):
+            return f"Folder not found: {folder}"
+
+        # --- Run the search ---
+        result = grep_folder(folder, pattern)
+
+        if "error" in result:
+            return f"Search error: {result['error']}"
+
+        searched = result.get("searched", 0)
+        matched = result.get("matched", 0)
+        matches = result.get("matches", [])
+
+        if matched == 0:
+            return (
+                f"No files found containing \"{pattern}\" in {Path(folder).name}. "
+                f"({searched} file(s) searched)"
+            )
+
+        # --- Update conversation context ---
+        matched_paths = [m["path"] for m in matches]
+        self._ctx["last_files"] = matched_paths
+        self._ctx["last_dir"] = folder
+
+        # If exactly one match, pre-load its full text for follow-up commands
+        if len(matches) == 1:
+            try:
+                doc_text = _read_full(Path(matches[0]["path"]), max_chars=15000)
+                if doc_text and not doc_text.startswith("[Binary") and not doc_text.startswith("[Image"):
+                    self._ctx["last_doc_text"] = doc_text
+            except Exception:
+                pass
+
+        # --- Format output ---
+        lines = [
+            f"Found {matched} file(s) containing \"{pattern}\" "
+            f"in {Path(folder).name} ({searched} searched):\n"
+        ]
+        for m in matches:
+            lines.append(f"  {m['name']}")
+            for snip in m.get("snippets", [])[:2]:
+                lines.append(f"    …{snip}…")
+        lines.append("")
+        if len(matches) == 1:
+            lines.append("Tip: say 'summarize that document' to read it in detail.")
+        else:
+            lines.append("Tip: say 'delete those files' to remove them all, or 'summarize (filename)' for a specific one.")
+        return "\n".join(lines)
+
     def _handle_diff(self, user_input: str) -> str:
         from use_cases.file_analysis import diff_files
         import re as _re
@@ -1477,11 +1767,589 @@ class EmberAgent:
                     lines.append(f"  ... and {len(matches)-20} more")
         return "\n".join(lines)
 
+    # ── Multi-document / synthesis handlers ──────────────────────
+
+    def _resolve_folder_from_text(self, text_lower: str,
+                                   original: str = "") -> Optional[str]:
+        """Resolve a folder path from natural language, with context fallback."""
+        import os
+        import re as _re
+        home = os.path.expanduser("~")
+        _KNOWN = [
+            ("downloads",  os.path.join(home, "Downloads")),
+            ("documents",  os.path.join(home, "Documents")),
+            ("desktop",    os.path.join(home, "Desktop")),
+            ("pictures",   os.path.join(home, "Pictures")),
+            ("videos",     os.path.join(home, "Videos")),
+            ("music",      os.path.join(home, "Music")),
+        ]
+        _KNOWN_MAP = dict(_KNOWN)
+        _bases = [path for _, path in _KNOWN]
+
+        # 1. Context: if last_dir's folder name appears in the query, return it first
+        last = self._ctx.get("last_dir")
+        if last:
+            from pathlib import Path as _P
+            basename = _P(last).name.lower()
+            if basename and len(basename) > 3 and basename in text_lower:
+                return last
+
+        # 2. Subfolder pattern: "my/the ResearchPapers folder in Documents"
+        m = _re.search(
+            r'\b(?:my|the)\s+([\w][\w ]*?)\s+folder\s+(?:in|inside)\s+(?:the\s+|my\s+)?'
+            r'(downloads|documents|desktop|pictures|videos|music)',
+            text_lower,
+        )
+        if m:
+            sub_name = m.group(1).strip()
+            base_path = _KNOWN_MAP.get(m.group(2))
+            if base_path:
+                try:
+                    for entry in os.listdir(base_path):
+                        if entry.lower() == sub_name.lower():
+                            return os.path.join(base_path, entry)
+                except OSError:
+                    pass
+                return os.path.join(base_path, sub_name)
+
+        # 3. "in FolderName" where FolderName starts uppercase — search known base paths
+        in_m = _re.search(r'\bin\s+([A-Z][A-Za-z0-9_\-]+)\b', original)
+        if in_m:
+            folder_name = in_m.group(1)
+            for base_path in _bases:
+                try:
+                    for entry in os.listdir(base_path):
+                        if entry.lower() == folder_name.lower():
+                            return os.path.join(base_path, entry)
+                except OSError:
+                    pass
+
+        # 4. Standard base folder match — skip "documents" used as a generic noun
+        for kw, path in _KNOWN:
+            if not _re.search(rf'\b{kw}\b', text_lower):
+                continue
+            if kw == "documents" and _re.search(
+                r'\b(?:all\s+(?:the\s+)?|the\s+)documents\s+in\b', text_lower
+            ):
+                continue
+            return path
+
+        # 5. Absolute path in original text
+        abs_m = _re.search(r'[A-Za-z]:\\[\w\\/ \-\.]+', original)
+        if abs_m:
+            candidate = abs_m.group().rstrip()
+            from pathlib import Path as _P
+            if _P(candidate).exists():
+                return candidate
+
+        return self._ctx.get("last_dir")
+
+    def _format_folder_docs(self, result: dict,
+                             folder_name: str) -> tuple[str, str]:
+        """Build combined document text and a header from batch_read_folder result."""
+        files = result.get("files", [])
+        n = len(files)
+        if n == 0:
+            return "", f"No readable documents found in {folder_name}."
+        names = ", ".join(f["name"] for f in files[:5])
+        if n > 5:
+            names += f", and {n - 5} more"
+        header = f"Read {n} document(s) from {folder_name}: {names}"
+        combined = "\n\n".join(
+            f"=== {f['name']} ===\n{f['text']}" for f in files
+        )
+        return combined, header
+
+    # ── Clarification engine ──────────────────────────────────────
+
+    def _advance_clarification(self, answer: str) -> str:
+        """Store one clarification answer; return next question or execute."""
+        cl = self.pending_clarification
+        key, _ = cl["questions"][cl["idx"]]
+        cl["params"][key] = answer.strip()
+        cl["idx"] += 1
+
+        if cl["idx"] < len(cl["questions"]):
+            return cl["questions"][cl["idx"]][1]
+
+        intent = cl["intent"]
+        params = dict(cl["params"])
+        self.pending_clarification = None
+
+        if intent == "create_doc":
+            return self._execute_create_doc(params)
+        return f"[Unknown clarification intent: {intent}]"
+
+    def _execute_create_doc(self, params: dict) -> str:
+        """Generate document content (if needed) and write the file."""
+        from use_cases.doc_gen import write_document
+        import os
+
+        # Resolve save directory
+        raw_dir = params.get("save_dir", "desktop").strip()
+        home = os.path.expanduser("~")
+        dir_map = {
+            "desktop":   os.path.join(home, "Desktop"),
+            "downloads": os.path.join(home, "Downloads"),
+            "documents": os.path.join(home, "Documents"),
+        }
+        save_dir = dir_map.get(raw_dir.lower())
+        if save_dir is None:
+            save_dir = raw_dir if os.path.isabs(raw_dir) else os.path.join(home, "Desktop")
+
+        filename = params.get("filename", "document.md")
+        out_path = os.path.join(save_dir, filename)
+
+        content = params.get("content", "")
+        if not content:
+            topic = params.get("topic") or params.get("user_request", "")
+            label = params.get("label", "structured")
+            reference_text = params.get("reference_text", "")
+            if topic and self.llm:
+                try:
+                    if reference_text:
+                        prompt = (
+                            f"Write a {label} document. The user's request: {topic}\n\n"
+                            "Use the following reference material to inform the content. "
+                            "Extract relevant details (names, amounts, dates, items) and "
+                            "incorporate them naturally into the document.\n\n"
+                            f"--- Reference Material ---\n{reference_text[:3500]}\n--- End Reference ---\n\n"
+                            "Write the document now, using clear headings and professional tone."
+                        )
+                    else:
+                        prompt = (
+                            f"Write a {label} document about the following topic or request. "
+                            "Use clear headings (# Heading) and well-organised paragraphs.\n\n"
+                            + topic[:3000]
+                        )
+                    content = self.llm.chat([
+                        {"role": "system",
+                         "content": "You are a professional writer. Write well-structured documents."},
+                        {"role": "user", "content": prompt},
+                    ])
+                except Exception as e:
+                    logger.warning("LLM content generation failed: %s", e)
+                    content = topic
+            if not content:
+                return "No content to write — please provide a topic or run a folder summary first."
+
+        result = write_document(out_path, content)
+        self._ctx["last_output_path"] = out_path
+        return result
+
+    # ── Directory listing ─────────────────────────────────────────
+
+    def _handle_list_dir(self, user_input: str) -> str:
+        """List files in a folder and store the folder in context."""
+        from use_cases.file_ops import list_directory
+        import os
+        lower = user_input.lower()
+        folder = self._resolve_folder_from_text(lower, user_input)
+        if not folder:
+            return "Please specify a folder, e.g. 'list files in Downloads'"
+
+        self._ctx["last_dir"] = folder
+        items = list_directory(folder)
+        if items and "error" in items[0]:
+            return items[0]["error"]
+
+        folder_name = os.path.basename(folder) or folder
+        lines = [f"{folder_name}  ({len(items)} item(s)):"]
+        for item in items:
+            prefix = "  [dir] " if item["type"] == "directory" else "       "
+            lines.append(f"{prefix}{item['name']:<40} {item.get('size_human',''):>8}  {item['modified']}")
+        return "\n".join(lines)
+
+    # ── Folder explanation ────────────────────────────────────────
+
+    def _handle_folder_explain(self, user_input: str) -> str:
+        """Return a structured overview of what a folder contains."""
+        from use_cases.file_analysis import folder_explain
+        import os
+        lower = user_input.lower()
+        folder = self._resolve_folder_from_text(lower, user_input)
+        if not folder:
+            return "Please specify a folder, e.g. 'explain what my Downloads folder contains'"
+
+        self._ctx["last_dir"] = folder
+        info = folder_explain(folder)
+        if "error" in info:
+            return info["error"]
+
+        folder_name = os.path.basename(folder) or folder
+        lines = [
+            f"{folder_name}  ({info['total_files']} file(s), {info['total_size']} total)"
+        ]
+        if info["by_type"]:
+            lines.append("\nFile types:")
+            for cat, count in sorted(info["by_type"].items(), key=lambda x: -x[1]):
+                lines.append(f"  {count:>3}  {cat}")
+        if info["largest_files"]:
+            lines.append("\nLargest files:")
+            for f in info["largest_files"]:
+                lines.append(f"  {f['size']:>8}  {f['name']}")
+        return "\n".join(lines)
+
+    # ── Folder-level document summarization ──────────────────────
+
+    def _handle_folder_docs_request(self, user_input: str) -> str:
+        """Read all documents in a folder and summarize them with the LLM.
+
+        Uses a multi-pass strategy for large documents:
+        1. Per-document pass: extract up to 12,000 chars per file, ask BitNet
+           for a ~300-word focused summary of each (max_tokens=500).
+        2. Synthesis pass: feed all per-doc summaries back to BitNet for a
+           comprehensive 1000+ word overview (max_tokens=1500).
+        This keeps each LLM call safely within BitNet's 4096-token context.
+        """
+        from use_cases.file_analysis import batch_read_folder
+        import os
+        lower = user_input.lower()
+
+        folder = self._resolve_folder_from_text(lower, user_input)
+        if not folder:
+            return (
+                "Please specify a folder, e.g. "
+                "'summarize all documents in Downloads'"
+            )
+
+        # Optional extension filter from the request
+        ext_filter = None
+        for label, exts in [
+            ("pdf", ["pdf"]), ("docx", ["docx"]), ("txt", ["txt"]),
+            ("markdown", ["md"]), ("csv", ["csv"]),
+            ("excel", ["xlsx"]), ("spreadsheet", ["xlsx", "csv"]),
+        ]:
+            if label in lower:
+                ext_filter = exts
+                break
+
+        # Use large per-file budget so research papers get meaningful extraction
+        result = batch_read_folder(folder, ext_filter,
+                                   max_chars_per_file=15000,
+                                   max_total_chars=100000)
+        if "error" in result:
+            return result["error"]
+
+        files = result.get("files", [])
+        if not files:
+            return f"No readable documents found in {os.path.basename(folder)}."
+
+        folder_name = os.path.basename(folder) or folder
+        self._ctx["last_dir"] = folder
+        self._ctx["last_files"] = [f["name"] for f in files]
+
+        names = ", ".join(f["name"] for f in files[:5])
+        if len(files) > 5:
+            names += f", and {len(files) - 5} more"
+        header = f"Read {len(files)} document(s) from {folder_name}: {names}"
+
+        # No LLM — return text previews
+        if not self.llm:
+            preview = "\n\n".join(
+                f"{f['name']}:\n" + "\n".join(f["text"].split("\n")[:8])
+                for f in files[:3]
+            )
+            return f"{header}\n\n{preview}"
+
+        # ── Pass 1: per-document summaries ─────────────────────────
+        # Each call: ~12,000 chars text (~3000 tokens) + 150 token instruction
+        # + 500 token output  ≈ 3650 total — safely within BitNet's 4096 ctx.
+        per_doc_summaries = []
+        for f in files:
+            doc_text = f["text"][:12000]
+            doc_name = f["name"]
+            try:
+                per_doc_prompt = (
+                    f"Document: {doc_name}\n\n"
+                    f"{doc_text}\n\n"
+                    "Write a thorough summary (~300 words) covering: "
+                    "main topic/research question, methodology or approach, "
+                    "key findings or content, and conclusions."
+                )
+                doc_summary = self.llm.chat(
+                    [
+                        {"role": "system",
+                         "content": (
+                             "You are a scientific analyst. "
+                             "Summarise the given document accurately and thoroughly."
+                         )},
+                        {"role": "user", "content": per_doc_prompt},
+                    ],
+                    max_tokens=500,
+                )
+                per_doc_summaries.append(
+                    f"=== {doc_name} ===\n{doc_summary.strip()}"
+                )
+            except Exception as e:
+                per_doc_summaries.append(
+                    f"=== {doc_name} ===\n[Could not summarise: {e}]"
+                )
+
+        all_summaries_text = "\n\n".join(per_doc_summaries)
+        self._ctx["last_doc_text"] = all_summaries_text
+
+        # ── Pass 2: synthesis ───────────────────────────────────────
+        # Input: per-doc summaries capped at 8,000 chars (~2000 tokens)
+        # + ~200 token instruction = ~2200 input.
+        # max_tokens=1500 → ~1100 words — fits within BitNet's 4096 ctx.
+        try:
+            synth_prompt = (
+                f"Below are individual summaries of {len(files)} document(s) "
+                f"from the '{folder_name}' collection.\n\n"
+                f"{all_summaries_text[:8000]}\n\n"
+                "Write a comprehensive, well-structured overview of at least "
+                "1000 words. Cover the main themes, methodologies, findings, "
+                "and conclusions across all documents. Identify common threads, "
+                "contrasts, and the overall significance of this collection."
+            )
+            synthesis = self.llm.chat(
+                [
+                    {"role": "system",
+                     "content": (
+                         "You are a scientific analyst writing thorough research "
+                         "overviews. Be detailed and write at least 1000 words."
+                     )},
+                    {"role": "user", "content": synth_prompt},
+                ],
+                max_tokens=1500,
+            )
+            self._ctx["last_summary"] = synthesis.strip()
+            return f"{header}\n\n{synthesis.strip()}"
+        except Exception as e:
+            # Synthesis failed — return individual summaries as fallback
+            self._ctx["last_summary"] = all_summaries_text
+            return (
+                f"{header}\n\n"
+                f"[Synthesis unavailable: {e}]\n\n"
+                f"Individual summaries:\n\n{all_summaries_text}"
+            )
+
+    # ── Multi-document comparison ─────────────────────────────────
+
+    def _handle_multi_doc_compare(self, user_input: str) -> str:
+        """Compare documents in a folder using the LLM."""
+        from use_cases.file_analysis import batch_read_folder
+        import os
+        lower = user_input.lower()
+
+        folder = self._resolve_folder_from_text(lower, user_input)
+        if not folder:
+            return "Please specify a folder to compare documents in."
+
+        result = batch_read_folder(folder)
+        if "error" in result:
+            return result["error"]
+
+        files = result.get("files", [])
+        folder_name = os.path.basename(folder) or folder
+        if len(files) < 2:
+            return (
+                f"Need at least 2 documents to compare. "
+                f"Found {len(files)} readable file(s) in {folder_name}."
+            )
+
+        combined, header = self._format_folder_docs(result, folder_name)
+        self._ctx.update({
+            "last_dir": folder,
+            "last_files": [f["name"] for f in files],
+            "last_doc_text": combined,
+        })
+
+        if not self.llm:
+            return f"{header}\n\nLLM unavailable — cannot run comparison."
+
+        try:
+            prompt = (
+                f"Compare the following {len(files)} documents from {folder_name}. "
+                "For each document briefly describe its content and focus. "
+                "Then highlight similarities and key differences across all of them.\n\n"
+                + combined[:9000]
+            )
+            comparison = self.llm.chat([
+                {"role": "system",
+                 "content": "You are a document analyst. Compare documents objectively and clearly."},
+                {"role": "user", "content": prompt},
+            ])
+            self._ctx["last_summary"] = comparison.strip()
+            return f"{header}\n\n{comparison.strip()}"
+        except Exception as e:
+            return f"{header}\n\n[LLM comparison failed: {e}]"
+
+    # ── Folder topic / theme extraction ──────────────────────────
+
+    def _handle_folder_topics(self, user_input: str) -> str:
+        """Identify key topics and themes across folder documents."""
+        from use_cases.file_analysis import batch_read_folder
+        import os
+        lower = user_input.lower()
+
+        folder = self._resolve_folder_from_text(lower, user_input)
+        if not folder:
+            return "Please specify a folder, e.g. 'key topics across my Documents folder'"
+
+        result = batch_read_folder(folder)
+        if "error" in result:
+            return result["error"]
+
+        files = result.get("files", [])
+        if not files:
+            return f"No readable documents found in {os.path.basename(folder)}."
+
+        folder_name = os.path.basename(folder) or folder
+        combined, header = self._format_folder_docs(result, folder_name)
+        self._ctx.update({"last_dir": folder, "last_doc_text": combined})
+
+        if not self.llm:
+            return f"{header}\n\nLLM unavailable — cannot extract topics."
+
+        try:
+            prompt = (
+                "Identify the key topics, themes, and subjects that appear across "
+                "these documents. List the most important topics and note which "
+                "documents cover each one.\n\n" + combined[:9000]
+            )
+            topics = self.llm.chat([
+                {"role": "system",
+                 "content": "You are a document analyst. Identify key topics and themes clearly."},
+                {"role": "user", "content": prompt},
+            ])
+            return f"{header}\n\n{topics.strip()}"
+        except Exception as e:
+            return f"{header}\n\n[LLM topic extraction failed: {e}]"
+
+    # ── Document creation with clarification ─────────────────────
+
+    def _handle_create_doc(self, user_input: str) -> str:
+        """Create a document, asking for filename/location if not specified."""
+        import re as _re
+        lower = user_input.lower()
+
+        params: dict = {"user_request": user_input}
+
+        # Detect reference context triggers — user wants a doc based on previously seen content
+        _REFERENCE_TRIGGERS = (
+            "based on", "referencing", "reference", "acknowledging",
+            "responding to", "response to", "reply to", "in response to",
+            "about that", "regarding that", "from that", "using that",
+            "for that invoice", "for that document", "for that file",
+            "acknowledging receipt", "acknowledging their",
+            "following up on", "follow up on",
+        )
+        has_reference_trigger = any(t in lower for t in _REFERENCE_TRIGGERS)
+
+        if has_reference_trigger and self._ctx.get("last_doc_text"):
+            # Use the previously loaded document as reference material
+            params["topic"] = user_input
+            params["reference_text"] = self._ctx["last_doc_text"][:4000]
+        elif self._ctx.get("last_summary"):
+            params["content"] = self._ctx["last_summary"]
+        elif self._ctx.get("last_doc_text"):
+            params["topic"] = user_input + "\n\n" + self._ctx["last_doc_text"][:3000]
+        else:
+            params["topic"] = user_input
+
+        # Style / length label
+        if "short" in lower or "brief" in lower or "quick" in lower:
+            params["label"] = "short and concise"
+        elif "full" in lower or "detailed" in lower or "comprehensive" in lower:
+            params["label"] = "detailed and comprehensive"
+        elif "executive" in lower:
+            params["label"] = "executive"
+        elif "study guide" in lower or "knowledge" in lower:
+            params["label"] = "study guide with key concepts"
+        elif "comparison" in lower or "compare" in lower:
+            params["label"] = "comparison"
+        else:
+            params["label"] = "structured"
+
+        # Format preference
+        for fmt in ("pdf", "docx", "markdown", "md", "txt"):
+            if fmt in lower:
+                params["format"] = "md" if fmt == "markdown" else fmt
+                break
+
+        # Save directory from request
+        import os
+        home = os.path.expanduser("~")
+        for kw, path in [
+            ("downloads",  os.path.join(home, "Downloads")),
+            ("documents",  os.path.join(home, "Documents")),
+            ("desktop",    os.path.join(home, "Desktop")),
+        ]:
+            if kw in lower:
+                params["save_dir"] = path
+                break
+
+        # Explicit filename in request (word.ext pattern)
+        fname_m = _re.search(_ext_pattern(), user_input, _re.IGNORECASE)
+        if fname_m:
+            params["filename"] = fname_m.group().strip()
+
+        # Build question queue for missing required info
+        questions = []
+        if "filename" not in params:
+            default_ext = params.get("format", "md")
+            questions.append(
+                ("filename",
+                 f"What should the file be named? "
+                 f"(e.g. summary.{default_ext}, report.md, notes.pdf)")
+            )
+        if "save_dir" not in params:
+            questions.append(
+                ("save_dir",
+                 "Where should I save it? "
+                 "(Desktop, Downloads, Documents, or a full path)")
+            )
+
+        if not questions:
+            return self._execute_create_doc(params)
+
+        self.pending_clarification = {
+            "intent": "create_doc",
+            "params": params,
+            "questions": questions,
+            "idx": 0,
+        }
+        return questions[0][1]
+
+    # ── Document QA against loaded context ────────────────────────
+
+    def _handle_doc_qa(self, user_input: str) -> Optional[str]:
+        """Answer a question using the currently loaded document context."""
+        doc_text = self._ctx.get("last_doc_text") or self._ctx.get("last_summary", "")
+        if not doc_text:
+            return None  # no document context — let LLM handle it
+
+        if not self.llm:
+            return "LLM unavailable — cannot answer document questions."
+
+        try:
+            prompt = (
+                f"User question: {user_input}\n\n"
+                "Based only on the following document content, answer the question:\n\n"
+                + doc_text[:8000]
+            )
+            answer = self.llm.chat([
+                {"role": "system",
+                 "content": "You are a document analyst. Answer questions based only on the provided document content."},
+                {"role": "user", "content": prompt},
+            ])
+            return answer.strip()
+        except Exception as e:
+            return f"[LLM unavailable: {e}]"
+
     # ── Main Processing ──────────────────────────────────────────
 
     def _process(self, user_input: str) -> str:
         """Internal processing logic."""
-        # Check pending confirmation first
+        # Clarification flow takes priority (collecting answers to queued questions)
+        if self.pending_clarification is not None:
+            cl_result = self._advance_clarification(user_input)
+            self._store_turn(user_input, cl_result)
+            return cl_result
+
+        # Check pending confirmation next
         conf_result = self._check_confirmation(user_input)
         if conf_result is not None:
             return conf_result

@@ -353,6 +353,17 @@ class ToolRegistry:
             func=_tool_grep_file,
         )
         self.register(
+            name="grep_folder",
+            description="Search for a text pattern or regex inside all readable files in a folder (PDFs, DOCX, TXT, etc.)",
+            parameters={
+                "folder": {"type": "string", "description": "Folder path to search in"},
+                "pattern": {"type": "string", "description": "Regex or literal search pattern"},
+                "extensions": {"type": "array", "description": "File extensions to include, e.g. ['pdf','txt'] (default: all readable)"},
+                "case_sensitive": {"type": "boolean", "description": "Case-sensitive search (default false)"},
+            },
+            func=_tool_grep_folder,
+        )
+        self.register(
             name="diff_files",
             description="Show a unified diff between two text files",
             parameters={
@@ -659,6 +670,59 @@ class ToolRegistry:
             description="Remove all completed tasks from the list",
             parameters={},
             func=_tool_clear_completed_tasks,
+        )
+
+        # ── Multi-document / synthesis tools ──────────────────────
+        self.register(
+            name="batch_read_folder",
+            description=(
+                "Read all readable documents in a folder "
+                "(PDF, DOCX, XLSX, PPTX, TXT, CSV, Markdown, etc.) "
+                "and return their combined text content"
+            ),
+            parameters={
+                "folder": {"type": "string", "description": "Folder path to read documents from"},
+                "extensions": {
+                    "type": "array",
+                    "description": "Optional list of extensions to include, e.g. ['pdf', 'txt']",
+                },
+                "max_chars_per_file": {
+                    "type": "integer",
+                    "description": "Max characters to read per file (default: 4000)",
+                },
+            },
+            func=_tool_batch_read_folder,
+        )
+        self.register(
+            name="folder_explain",
+            description=(
+                "Return a structured description of what a folder contains: "
+                "file counts by type, total size, and the five largest files"
+            ),
+            parameters={
+                "folder": {"type": "string", "description": "Folder path to examine"},
+            },
+            func=_tool_folder_explain,
+        )
+        self.register(
+            name="write_document",
+            description=(
+                "Write text content to a file. "
+                "Supports TXT, Markdown (.md), PDF (requires fpdf2), and DOCX (requires python-docx). "
+                "Falls back to plain text when format libraries are absent."
+            ),
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": "Output file path including filename and extension",
+                },
+                "content": {"type": "string", "description": "Text content to write"},
+                "fmt": {
+                    "type": "string",
+                    "description": "Format override: txt, md, pdf, docx (optional; inferred from extension)",
+                },
+            },
+            func=_tool_write_document,
         )
 
 
@@ -1106,3 +1170,27 @@ def _tool_remove_task(task_id: int) -> str:
 def _tool_clear_completed_tasks() -> str:
     count = _get_task_manager().clear_completed()
     return f"Cleared {count} completed task(s)."
+
+
+# ── Multi-document / synthesis tool implementations ──────────────────
+
+def _tool_batch_read_folder(folder: str, extensions: list = None,
+                             max_chars_per_file: int = 4000) -> dict:
+    from use_cases.file_analysis import batch_read_folder
+    return batch_read_folder(folder, extensions, max_chars_per_file)
+
+
+def _tool_folder_explain(folder: str) -> dict:
+    from use_cases.file_analysis import folder_explain
+    return folder_explain(folder)
+
+
+def _tool_write_document(path: str, content: str, fmt: str = None) -> str:
+    from use_cases.doc_gen import write_document
+    return write_document(path, content, fmt)
+
+
+def _tool_grep_folder(folder: str, pattern: str, extensions: list = None,
+                      case_sensitive: bool = False) -> dict:
+    from use_cases.file_analysis import grep_folder
+    return grep_folder(folder, pattern, extensions=extensions, case_sensitive=case_sensitive)

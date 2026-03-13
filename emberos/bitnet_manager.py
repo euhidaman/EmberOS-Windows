@@ -63,6 +63,29 @@ class BitNetManager:
 
     def start_server(self) -> subprocess.Popen:
         """Start the BitNet inference server as a subprocess."""
+        # If a server is already answering on the configured port, reuse it
+        _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            _already_up = _sock.connect_ex((self.config.server_host, self.config.server_port)) == 0
+        finally:
+            _sock.close()
+        if _already_up:
+            import requests as _req
+            try:
+                r = _req.get(
+                    f"http://{self.config.server_host}:{self.config.server_port}/health",
+                    timeout=3,
+                )
+                if r.status_code == 200:
+                    logger.info(
+                        "BitNet server already running on port %d — reusing",
+                        self.config.server_port,
+                    )
+                    self._server_port = self.config.server_port
+                    return None  # type: ignore[return-value]
+            except Exception:
+                pass  # Not a live BitNet; fall through to normal startup
+
         binary = self.server_binary
         if not binary.exists():
             raise FileNotFoundError(f"BitNet server binary not found at {binary}")
