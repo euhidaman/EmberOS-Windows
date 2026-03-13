@@ -33,9 +33,74 @@ _VISION_STUB_KEYWORDS = ("what is in this image", "describe this image", "analyz
 _DESTRUCTIVE_SHELL = ("del ", "rm ", "rmdir ", "format ", "remove-item",
                       "rd ", "erase ")
 
+# App launch detection: matched against prefixes "open/launch/start + alias"
+_APP_LAUNCH_PREFIXES = ("open ", "launch ", "start ")
+
+# System query keywords
+_DISK_QUERY_KEYWORDS = (
+    "disk space", "disk usage", "free space", "storage space", "how much disk",
+    "how much storage", "mounted drives", "drive space", "drives and their free",
+)
+_RAM_QUERY_KEYWORDS = (
+    "ram usage", "memory usage", "how much ram", "how much memory",
+    "available ram", "available memory",
+)
+_PROCESS_QUERY_KEYWORDS = (
+    "running processes", "show processes", "list processes", "what processes",
+    "active processes", "show running",
+)
+_UPTIME_QUERY_KEYWORDS = (
+    "system uptime", "how long running", "machine uptime", "system up",
+    "how long the system", "how long has",
+)
+_CPU_QUERY_KEYWORDS = (
+    "cpu usage", "cpu temperature", "cpu temp", "cpu info", "cpu load",
+    "processor usage", "processor info", "check cpu",
+)
+
+# File find/organize keywords
+_FILE_FIND_KEYWORDS = (
+    "find all pdf", "find pdf", "find all image", "find all python",
+    "find python files", "find all files", "search for files", "find files",
+    "look for files", "find files named", "search files named",
+)
+_FILE_ORGANIZE_KEYWORDS = (
+    "organize my downloads", "organize the downloads", "organize downloads",
+    "organize my documents", "organize my desktop", "organize my pictures",
+    "organize folder", "sort files by type", "group files by type",
+    "organize files by type",
+)
+
 
 _CONFIRM_YES = {"yes", "y", "proceed", "ok", "sure", "do it", "go ahead", "yep", "yeah"}
 _CONFIRM_NO = {"no", "n", "cancel", "stop", "nope", "don't", "abort"}
+
+
+def _extract_explicit_tags(text: str):
+    """Extract user-specified tags from text like 'tag it as work, meeting'.
+    Returns (clean_text, tags_list) or (original_text, []) if none found.
+    """
+    import re
+    patterns = [
+        r'\s+(?:and\s+)?tag\s+it\s+as\s+([^.!?\n]+)',
+        r'\s+(?:and\s+)?store\s+it\s+under\s+(?:the\s+tag[s]?\s+)?([^.!?\n]+)',
+        r'\s+(?:and\s+)?label\s+it\s+(?:as\s+)?([^.!?\n]+)',
+        r'\s+with\s+tag[s]?\s+([^.!?\n]+)',
+        r'\s+tag[s]?:\s+([^.!?\n]+)',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            tag_str = m.group(1).strip().rstrip(".")
+            tags = [
+                t.strip().strip("\"'#").lower()
+                for t in re.split(r'[,\s]+(?:and\s+)?|[,]+', tag_str)
+                if t.strip()
+            ]
+            tags = [t for t in tags if t]
+            clean = text[:m.start()].strip()
+            return clean, tags
+    return text, []
 
 
 class EmberAgent:
@@ -73,6 +138,46 @@ class EmberAgent:
         self.pending_confirmation: Optional[dict] = None
 
         self._server_started = False
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    def _build_system_message(self, context_str: str, user_input: str) -> str:
+        tool_signatures = []
+        for tool in self.tools.list_tools():
+            param_names = ", ".join(tool["parameters"].keys())
+            tool_signatures.append(f"{tool['name']}({param_names})" if param_names else tool["name"])
+
+        compact_context = self._truncate_text(context_str.replace("\n", " "), 80)
+        compact_prompt = self._truncate_text(self.config.system_prompt, 110)
+
+        system_msg = (
+            f"{compact_prompt}\n"
+            f"Context: {compact_context}\n"
+            "If a tool is needed, reply with JSON only.\n"
+            '{"tool":"tool_name","params":{"arg":"value"}}\n'
+            "Multiple tools: JSON array only.\n"
+            "Tools: "
+            + ", ".join(tool_signatures)
+        )
+
+        if any(kw in user_input.lower() for kw in _RECALL_KEYWORDS):
+            try:
+                past_hits = self.vector_store.search(user_input, top_k=2)
+                if past_hits:
+                    recall_parts = []
+                    for hit in past_hits:
+                        role = hit["metadata"].get("role", "?")
+                        text = self._truncate_text(hit["text"].replace("\n", " "), 80)
+                        recall_parts.append(f"- [{role}] {text}")
+                    system_msg += "\nRelevant past context:\n" + "\n".join(recall_parts)
+            except Exception:
+                logger.debug("Vector recall failed", exc_info=True)
+
+        return system_msg
 
     @property
     def notes_mgr(self):
@@ -199,6 +304,26 @@ class EmberAgent:
         if any(kw in lower for kw in _CALENDAR_KEYWORDS):
             return self._handle_calendar_stub(user_input)
 
+        # System queries (disk, RAM, CPU, processes, uptime) — direct Python, no LLM needed
+        sys_result = self._handle_system_query(user_input)
+        if sys_result is not None:
+            return sys_result
+
+        # App launching — direct Python, no LLM needed
+        app_result = self._handle_app_launch(user_input)
+        if app_result is not None:
+            return app_result
+
+        # File finding — direct Python, no LLM needed
+        file_find = self._handle_file_find(user_input)
+        if file_find is not None:
+            return file_find
+
+        # Folder organization with confirmation
+        file_org = self._handle_file_organize(user_input)
+        if file_org is not None:
+            return file_org
+
         # Web search stub
         if any(kw in lower for kw in _WEB_SEARCH_KEYWORDS):
             return self._handle_web_search(user_input)
@@ -216,8 +341,7 @@ class EmberAgent:
 
     def _handle_note_save(self, user_input: str) -> str:
         """Save a user note."""
-        from use_cases.notes import time_ago
-        # Extract content after keywords
+        # Extract content after save keywords
         content = user_input
         for kw in _NOTE_SAVE_KEYWORDS:
             idx = user_input.lower().find(kw)
@@ -227,21 +351,26 @@ class EmberAgent:
         if not content:
             content = user_input
 
+        # Extract any explicit user-provided tags first
+        content, tags = _extract_explicit_tags(content)
+        if not content:
+            content = user_input
+
         # Use first line or first 50 chars as title
         title = content.split("\n")[0][:50]
 
-        # Try to get LLM-suggested tags
-        tags = []
-        try:
-            tag_prompt = (f"Suggest 2-3 short tags (single words) for this note, "
-                          f"comma-separated, no other text: {content[:200]}")
-            tag_resp = self.llm.chat([
-                {"role": "system", "content": "Reply with only comma-separated tags."},
-                {"role": "user", "content": tag_prompt},
-            ])
-            tags = [t.strip().lower().strip("#") for t in tag_resp.split(",") if t.strip()][:3]
-        except Exception:
-            pass
+        # If no explicit tags, try LLM-suggested tags
+        if not tags:
+            try:
+                tag_prompt = (f"Suggest 2-3 short tags (single words) for this note, "
+                              f"comma-separated, no other text: {content[:200]}")
+                tag_resp = self.llm.chat([
+                    {"role": "system", "content": "Reply with only comma-separated tags."},
+                    {"role": "user", "content": tag_prompt},
+                ])
+                tags = [t.strip().lower().strip("#") for t in tag_resp.split(",") if t.strip()][:3]
+            except Exception:
+                pass
 
         note = self.notes_mgr.add(title, content, tags)
         tags_str = ", ".join(note["tags"]) if note["tags"] else "none"
@@ -319,6 +448,176 @@ class EmberAgent:
         except Exception as e:
             return f"Failed to open URL: {e}"
 
+    def _handle_app_launch(self, user_input: str) -> Optional[str]:
+        """Handle app launch requests like 'open calculator', 'launch vs code'."""
+        from use_cases.app_launcher import APP_ALIASES, launch_app
+        lower = user_input.lower().strip()
+
+        for prefix in _APP_LAUNCH_PREFIXES:
+            if lower.startswith(prefix):
+                app_hint = lower[len(prefix):].strip().rstrip(".")
+                # Direct alias match
+                if app_hint in APP_ALIASES:
+                    return launch_app(app_hint)
+                # Partial: find longest alias contained in app_hint
+                best = max(
+                    (alias for alias in APP_ALIASES if alias in app_hint),
+                    key=len, default=None,
+                )
+                if best:
+                    return launch_app(best)
+        return None
+
+    def _handle_system_query(self, user_input: str) -> Optional[str]:
+        """Handle direct system status queries (disk, RAM, CPU, processes, uptime)."""
+        lower = user_input.lower()
+
+        if any(kw in lower for kw in _DISK_QUERY_KEYWORDS):
+            from use_cases.system_queries import get_disk_usage
+            return get_disk_usage()
+
+        if any(kw in lower for kw in _RAM_QUERY_KEYWORDS):
+            from use_cases.system_queries import get_ram_status
+            return get_ram_status()
+
+        if any(kw in lower for kw in _PROCESS_QUERY_KEYWORDS):
+            filter_name = None
+            # Try to find a process filter word ("python processes", "chrome", etc.)
+            import re as _re
+            m = _re.search(r'(?:especially\s+any\s+|only\s+|filter\s+)?(\w+)\s+processes?', lower)
+            if m and m.group(1) not in ("running", "active", "all", "show", "list", "what"):
+                filter_name = m.group(1)
+            from use_cases.system_queries import get_running_processes
+            return get_running_processes(filter_name)
+
+        if any(kw in lower for kw in _UPTIME_QUERY_KEYWORDS):
+            from use_cases.system_queries import get_system_uptime
+            return get_system_uptime()
+
+        if any(kw in lower for kw in _CPU_QUERY_KEYWORDS):
+            if "temperature" in lower or "temp" in lower:
+                from use_cases.system_queries import check_cpu_temperature
+                return check_cpu_temperature()
+            from use_cases.system_queries import get_cpu_info
+            return get_cpu_info()
+
+        return None
+
+    def _handle_file_find(self, user_input: str) -> Optional[str]:
+        """Handle file search/find requests."""
+        lower = user_input.lower()
+        if not any(kw in lower for kw in _FILE_FIND_KEYWORDS):
+            return None
+
+        import os
+        import re as _re
+        from use_cases.file_ops import find_files
+
+        # Determine file type from keywords
+        file_type = None
+        type_map = [
+            ("pdf", "pdf"), (".py", "code"), ("python", "code"),
+            ("image", "image"), ("picture", "image"), ("photo", "image"),
+            ("document", "document"), ("spreadsheet", "spreadsheet"),
+            ("video", "video"), ("audio", "audio"), ("archive", "archive"),
+        ]
+        for kw, ftype in type_map:
+            if kw in lower:
+                file_type = ftype
+                break
+
+        # Determine search root from common folder names
+        home = os.path.expanduser("~")
+        search_root = None
+        for folder_kw, folder_path in [
+            ("downloads", os.path.join(home, "Downloads")),
+            ("documents", os.path.join(home, "Documents")),
+            ("desktop", os.path.join(home, "Desktop")),
+            ("pictures", os.path.join(home, "Pictures")),
+            ("music", os.path.join(home, "Music")),
+            ("videos", os.path.join(home, "Videos")),
+        ]:
+            if folder_kw in lower:
+                search_root = folder_path
+                break
+
+        # Modified-time filter
+        modified_days = None
+        if "today" in lower or "modified today" in lower:
+            modified_days = 1
+        elif "last 7 days" in lower or "this week" in lower:
+            modified_days = 7
+        elif "last 30 days" in lower or "this month" in lower:
+            modified_days = 30
+
+        # Name query (e.g. "named budget", "name budget")
+        query = ""
+        m = _re.search(r"named?\s+['\"]?(\w[\w\-\.]*)", lower)
+        if m:
+            query = m.group(1)
+
+        results = find_files(query, search_root, file_type, modified_days)
+
+        if not results:
+            root_desc = os.path.basename(search_root) if search_root else "home folder"
+            type_desc = f" {file_type}" if file_type else ""
+            q_desc = f" named '{query}'" if query else ""
+            return f"No{type_desc} files{q_desc} found in {root_desc}."
+
+        lines = [f"Found {len(results)} file(s):"]
+        for path in results[:20]:
+            lines.append(f"  {path}")
+        if len(results) > 20:
+            lines.append(f"  ... and {len(results) - 20} more")
+        return "\n".join(lines)
+
+    def _handle_file_organize(self, user_input: str) -> Optional[str]:
+        """Handle folder organization with preview → confirmation flow."""
+        lower = user_input.lower()
+        if not any(kw in lower for kw in _FILE_ORGANIZE_KEYWORDS):
+            return None
+
+        import os
+        home = os.path.expanduser("~")
+        folder = None
+        for folder_kw, folder_path in [
+            ("downloads", os.path.join(home, "Downloads")),
+            ("documents", os.path.join(home, "Documents")),
+            ("desktop", os.path.join(home, "Desktop")),
+            ("pictures", os.path.join(home, "Pictures")),
+        ]:
+            if folder_kw in lower:
+                folder = folder_path
+                break
+
+        if not folder:
+            return None
+
+        from use_cases.file_ops import organize_folder_by_type
+        result = organize_folder_by_type(folder, preview_only=True)
+
+        if "error" in result:
+            return result["error"]
+
+        preview = result.get("preview", {})
+        total = result.get("total_files", 0)
+
+        if total == 0:
+            return f"No files to organize in {folder}."
+
+        lines = [f"Here's what organizing {os.path.basename(folder)} by file type would do:"]
+        for cat, count in sorted(preview.items(), key=lambda x: -x[1]):
+            lines.append(f"  {count} file(s) → {cat}/")
+        lines.append(f"\nTotal: {total} file(s) will be moved.")
+        lines.append("\nShall I proceed? (yes/no)")
+
+        self.pending_confirmation = {
+            "action": "organize_folder",
+            "params": {"folder": folder},
+            "description": f"Organize folder: {folder}",
+        }
+        return "\n".join(lines)
+
     # ── Main Processing ──────────────────────────────────────────
 
     def _process(self, user_input: str) -> str:
@@ -338,36 +637,14 @@ class EmberAgent:
         context_str = self.context_monitor.format_context()
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        # Build system message
-        tools_schema = json.dumps(self.tools.list_tools(), indent=2)
-        system_msg = (
-            f"{self.config.system_prompt}\n\n"
-            f"## Current System Context\n{context_str}\n\n"
-            f"## Available Tools\n"
-            f"To call a tool, include a JSON block in your response like: "
-            f'{{"tool": "tool_name", "params": {{...}}}}\n'
-            f"For multiple tool calls, use a JSON array: "
-            f'[{{"tool": "...", "params": {{...}}}}, ...]\n\n'
-            f"{tools_schema}"
-        )
-
-        # Semantic recall: if user references past context, inject relevant history
-        input_lower = user_input.lower()
-        if any(kw in input_lower for kw in _RECALL_KEYWORDS):
-            try:
-                past_hits = self.vector_store.search(user_input, top_k=3)
-                if past_hits:
-                    recall_parts = []
-                    for hit in past_hits:
-                        recall_parts.append(f"- [{hit['metadata'].get('role', '?')}] {hit['text'][:300]}")
-                    system_msg += "\n\n## Relevant past context\n" + "\n".join(recall_parts)
-            except Exception:
-                logger.debug("Vector recall failed", exc_info=True)
+        system_msg = self._build_system_message(context_str, user_input)
 
         # Build messages via context window manager
         messages = self.ctx_manager.get_messages_for_llm(
             self.session_id, system_msg, user_input, self.llm,
         )
+        prompt_estimate = sum(self.ctx_manager._estimate_tokens(m["content"]) for m in messages)
+        logger.info("LLM prompt estimate: ~%d tokens across %d messages", prompt_estimate, len(messages))
 
         # Call LLM
         try:
@@ -442,6 +719,26 @@ class EmberAgent:
                         "description": f"Run command: {params.get('cmd', '')}",
                     }
                     return f"This command may be destructive: `{params.get('cmd', '')}`\nProceed? (yes/no)"
+
+            elif tool_name == "delete_file":
+                path = params.get("path", "")
+                self.pending_confirmation = {
+                    "action": "delete_file",
+                    "params": params,
+                    "description": f"Delete: {path}",
+                }
+                return f"About to delete: `{path}`\nProceed? (yes/no)"
+
+            elif tool_name == "organize_folder":
+                if not params.get("preview_only", True):
+                    folder = params.get("folder", "")
+                    self.pending_confirmation = {
+                        "action": "organize_folder",
+                        "params": params,
+                        "description": f"Organize folder: {folder}",
+                    }
+                    return f"About to organize `{folder}` by file type into subfolders.\nProceed? (yes/no)"
+
         return None
 
     def _execute_tools_with_interrupt(self, calls: list[dict]) -> list[ToolResult]:

@@ -13,10 +13,14 @@ from emberos.config import Config, ROOT_DIR
 logger = logging.getLogger("emberos.bitnet_manager")
 
 
-def _find_free_port(host: str, start_port: int, max_attempts: int = 5) -> int:
-    """Find a free port starting from start_port."""
-    for i in range(max_attempts):
-        port = start_port + i
+def _find_free_port(host: str, start_port: int, max_attempts: int = 5, exclude_ports: tuple = ()) -> int:
+    """Find a free port starting from start_port, skipping excluded ports."""
+    checked = 0
+    port = start_port
+    while checked < max_attempts + len(exclude_ports):
+        if port in exclude_ports:
+            port += 1
+            continue
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             result = sock.connect_ex((host, port))
@@ -24,7 +28,9 @@ def _find_free_port(host: str, start_port: int, max_attempts: int = 5) -> int:
                 return port
         finally:
             sock.close()
-    raise RuntimeError(f"No free port found in range {start_port}-{start_port + max_attempts - 1}")
+        port += 1
+        checked += 1
+    raise RuntimeError(f"No free port found starting from {start_port}")
 
 
 class BitNetManager:
@@ -65,10 +71,12 @@ class BitNetManager:
         if not model_path.exists():
             raise FileNotFoundError(f"Model not found at {model_path}")
 
-        # Find a free port
+        # Find a free port, never use the agent API port
         try:
             self._server_port = _find_free_port(
-                self.config.server_host, self.config.server_port
+                self.config.server_host,
+                self.config.server_port,
+                exclude_ports=(self.config.agent_api_port,),
             )
         except RuntimeError:
             logger.error("No free port available for BitNet server")

@@ -8,7 +8,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$venvPython = "$ROOT\env\venv\Scripts\python.exe"
+$runtimePython = "$ROOT\env\python-embed\python.exe"
+if (-not (Test-Path $runtimePython)) {
+    $runtimePython = "$ROOT\env\venv\Scripts\python.exe"
+}
 $logDir = "$ROOT\logs"
 $launchLog = "$logDir\launch.log"
 
@@ -17,9 +20,9 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-# Check venv exists
-if (-not (Test-Path $venvPython)) {
-    Write-Host "ERROR: Venv Python not found at $venvPython" -ForegroundColor Red
+# Check runtime exists
+if (-not (Test-Path $runtimePython)) {
+    Write-Host "ERROR: Python runtime not found at $runtimePython" -ForegroundColor Red
     Write-Host "Run setup.ps1 first."
     exit 1
 }
@@ -30,7 +33,7 @@ $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
 
 if (-not $svc) {
     Write-Host "EmberOS service not installed — installing now..."
-    & $venvPython -m emberos.service install 2>&1
+    & $runtimePython -m emberos.service install 2>&1
     Start-Sleep -Seconds 2
     $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
 }
@@ -45,14 +48,14 @@ if ($svc) {
         } catch {
             Write-Host "Could not start service (may need Admin privileges)." -ForegroundColor Yellow
             Write-Host "Starting agent in standalone mode instead..."
-            Start-Process -FilePath $venvPython -ArgumentList "-m emberos.service" -WindowStyle Hidden
+            Start-Process -FilePath $runtimePython -ArgumentList "-m emberos.service" -WindowStyle Hidden
         }
     } else {
         Write-Host "EmberOS service is already running."
     }
 } else {
     Write-Host "Service registration failed — starting agent in standalone mode..."
-    Start-Process -FilePath $venvPython -ArgumentList "-m emberos.service" -WindowStyle Hidden
+    Start-Process -FilePath $runtimePython -ArgumentList "-m emberos.service" -WindowStyle Hidden
 }
 
 # Wait for service/agent to initialize
@@ -61,7 +64,7 @@ Start-Sleep -Seconds 5
 
 # Launch tray app
 Write-Host "Launching system tray icon..."
-Start-Process -FilePath $venvPython -ArgumentList "-m emberos.tray" -WindowStyle Hidden
+Start-Process -FilePath $runtimePython -ArgumentList "-m emberos.tray" -WindowStyle Hidden
 
 # Log launch
 Add-Content -Path $launchLog -Value "$timestamp - EmberOS launched"

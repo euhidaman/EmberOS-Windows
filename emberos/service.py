@@ -71,11 +71,30 @@ class AgentAPIHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length).decode("utf-8")
             data = json.loads(body)
             user_input = data.get("input", "")
-            if not user_input:
+            attached_files = data.get("attached_files", [])
+
+            if not user_input and not attached_files:
                 self._send_json(400, {"error": "Missing 'input' field"})
                 return
+
             if self.agent:
-                response = self.agent.run_once(user_input)
+                if attached_files:
+                    from use_cases.file_analysis import analyze_attached_files
+                    file_content = analyze_attached_files(
+                        attached_files,
+                        user_input or "Analyze the attached files",
+                        llm_client=None,  # raw content; agent LLM handles the analysis
+                    )
+                    if len(file_content) > 4000:
+                        file_content = file_content[:4000] + "\n[... truncated]"
+                    combined = (
+                        f"{user_input}\n\n[Attached file(s)]\n{file_content}"
+                        if user_input else
+                        f"[Attached file(s)]\n{file_content}"
+                    )
+                    response = self.agent.run_once(combined)
+                else:
+                    response = self.agent.run_once(user_input)
                 self._send_json(200, {"response": response})
             else:
                 self._send_json(503, {"error": "Agent not initialized"})
@@ -97,9 +116,9 @@ class AgentAPIHandler(BaseHTTPRequestHandler):
         try:
             status = {
                 "service": "running",
-                "bitnet_server": self.agent.bitnet.get_server_status() if self.agent else "unknown",
+                "runtime_server": self.agent.bitnet.get_server_status() if self.agent else "unknown",
                 "gpu_mode": self.agent.config.gpu_mode if self.agent else "unknown",
-                "model": self.agent.config.model_path if self.agent else "",
+                "model": "local",
                 "memory_entries": self.agent.conv_store.get_session_count(self.agent.session_id) if self.agent else 0,
                 "server_port": self.agent.bitnet.server_port if self.agent else 0,
                 "has_snapshots": self.agent.snapshot_mgr.has_snapshots() if self.agent else False,

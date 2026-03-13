@@ -185,6 +185,10 @@ class ContextWindowManager:
 
     def __init__(self, config):
         self.max_context_tokens = getattr(config, "max_context_tokens", 3500)
+        # BitNet on this Windows build becomes unstable with larger prompts, so
+        # keep the effective prompt budget conservative even if the logical
+        # context window is larger.
+        self.prompt_token_budget = min(self.max_context_tokens, 220)
         self.summarize_after_turns = getattr(config, "summarize_after_turns", 10)
         self.turns_to_keep_verbatim = getattr(config, "turns_to_keep_verbatim", 6)
         self.conv_store: Optional[ConversationStore] = None
@@ -196,7 +200,9 @@ class ContextWindowManager:
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
-        return int(len(text.split()) * 1.3)
+        word_estimate = int(len(text.split()) * 1.3)
+        char_estimate = (len(text) + 2) // 3
+        return max(word_estimate, char_estimate)
 
     def get_messages_for_llm(self, session_id: str, system_prompt: str,
                              new_user_message: str, llm_client) -> list[dict]:
@@ -221,17 +227,14 @@ class ContextWindowManager:
         new_msg_tokens = self._estimate_tokens(new_user_message)
         verbatim_tokens = sum(self._estimate_tokens(m["content"]) for m in verbatim_msgs)
         used = system_tokens + new_msg_tokens + verbatim_tokens
-        remaining = self.max_context_tokens - used
+        remaining = self.prompt_token_budget - used
 
-        # If even verbatim overflows, trigger summarization
-        if remaining < 0 and older:
-            summary = self.summarize_old_turns(session_id, older, llm_client)
-            older_msgs = [{"role": "system", "content": summary}]
-        elif remaining < 0:
-            # Nothing to summarize, just truncate verbatim from the top
+        # For the local BitNet backend, dropping history is more reliable than
+        # summarizing, because a summary request can be large enough to crash it.
+        if remaining < 0:
             while verbatim_msgs and self._estimate_tokens(system_prompt) + new_msg_tokens + sum(
                 self._estimate_tokens(m["content"]) for m in verbatim_msgs
-            ) > self.max_context_tokens:
+            ) > self.prompt_token_budget:
                 verbatim_msgs.pop(0)
             older_msgs = []
         else:

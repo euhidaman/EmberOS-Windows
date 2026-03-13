@@ -616,7 +616,7 @@ class EmberGUI:
                 pass
             self.status_label.configure(
                 text=f"Status: {self.agent_status}  \u2022  "
-                     f"Model: BitNet-b1.58-2B-4T  \u2022  "
+                     f"Model: Local Runtime  \u2022  "
                      f"CPU: {cpu:.0f}%  \u2022  RAM: {ram:.0f}%  \u2022  "
                      f"Memory: {mem_count} conversations"
             )

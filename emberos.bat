@@ -8,10 +8,14 @@ REM   chat | status | start | stop | query "text" | logs | install | uninstall
 
 setlocal
 set "ROOT=%~dp0"
-set "PYTHON=%ROOT%env\venv\Scripts\python.exe"
+set "PYTHON=%ROOT%env\python-embed\python.exe"
 
 if not exist "%PYTHON%" (
-    echo ERROR: Venv Python not found. Run setup.ps1 first.
+    set "PYTHON=%ROOT%env\venv\Scripts\python.exe"
+)
+
+if not exist "%PYTHON%" (
+    echo ERROR: Python runtime not found. Run setup.ps1 first.
     exit /b 1
 )
 
