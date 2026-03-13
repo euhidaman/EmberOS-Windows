@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(\"env\\\\python-embed\\\\python.exe\" -c \":*)",
-      "Bash(\"env\\\\python-embed\\\\python.exe\" -W ignore -c \":*)"
-    ]
-  }
-}

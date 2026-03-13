@@ -19,3 +19,11 @@ build/
 .vscode/
 *.swp
 *.swo
+
+# AI Assistant / IDE folders
+.claude/
+.gemini/
+.cursor/
+.windsurf/
+.copilot/
+.aider/
