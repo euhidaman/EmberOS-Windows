@@ -2,12 +2,18 @@
 
 import json
 import logging
+import threading
 import time
 from typing import Generator, Optional
 
 import requests
 
 logger = logging.getLogger("emberos.llm_client")
+
+# Global lock — BitNet is single-threaded; serialise all outgoing requests.
+_BITNET_LOCK = threading.Lock()
+
+_RETRY_DELAYS = (3, 10, 20)   # seconds between attempts 1→2, 2→3, and after 3
 
 
 class LLMClient:
@@ -21,13 +27,33 @@ class LLMClient:
         self.max_tokens = max_tokens
         self.timeout = timeout
         self._session = requests.Session()
+        self._lock = _BITNET_LOCK
+        self._cooldown_until = 0.0   # timestamp — skip all calls until then
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
+    def _new_session(self):
+        """Replace the session after a connection reset so stale sockets are dropped."""
+        try:
+            self._session.close()
+        except Exception:
+            pass
+        self._session = requests.Session()
+
     def chat(self, messages: list, temperature: Optional[float] = None,
              max_tokens: Optional[int] = None) -> str:
-        """Send a chat completion request and return the assistant message."""
+        """Send a chat completion request and return the assistant message.
+
+        Serialises requests via a global lock (BitNet is single-threaded) and
+        uses exponential backoff on connection errors.  After all retries fail
+        a 45-second cooldown prevents subsequent calls from wasting time.
+        """
+        # If we recently failed all retries, skip immediately.
+        now = time.time()
+        if now < self._cooldown_until:
+            raise ConnectionError("LLM server recently unavailable — in cooldown")
+
         payload = {
             "messages": messages,
             "temperature": temperature if temperature is not None else self.temperature,
@@ -36,30 +62,36 @@ class LLMClient:
         }
 
         last_error = None
-        for attempt in range(3):
-            try:
-                resp = self._session.post(
-                    self._url("/v1/chat/completions"),
-                    json=payload,
-                    timeout=self.timeout,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                choices = data.get("choices", [])
-                if choices:
-                    return choices[0]["message"]["content"]
-                return ""
-            except requests.ConnectionError as e:
-                last_error = e
-                logger.warning("LLM connection error (attempt %d/3): %s", attempt + 1, e)
-                time.sleep(2)
-            except requests.HTTPError as e:
-                logger.error("LLM HTTP error: %s", e)
-                raise
-            except Exception as e:
-                logger.error("LLM unexpected error: %s", e)
-                raise
+        with self._lock:
+            for attempt, delay in enumerate(_RETRY_DELAYS, start=1):
+                try:
+                    resp = self._session.post(
+                        self._url("/v1/chat/completions"),
+                        json=payload,
+                        timeout=self.timeout,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    self._cooldown_until = 0.0  # success — clear cooldown
+                    return choices[0]["message"]["content"] if choices else ""
+                except requests.ConnectionError as e:
+                    last_error = e
+                    logger.warning("LLM connection error (attempt %d/3): %s", attempt, e)
+                    if "10054" in str(e) or "ConnectionResetError" in str(e):
+                        self._new_session()
+                    if attempt < 3:
+                        time.sleep(delay)
+                except requests.HTTPError as e:
+                    logger.error("LLM HTTP error: %s", e)
+                    raise
+                except Exception as e:
+                    logger.error("LLM unexpected error: %s", e)
+                    raise
 
+        # All retries exhausted — enter cooldown so the next handler
+        # doesn't waste another 33 seconds against a dead server.
+        self._cooldown_until = time.time() + 45
         raise ConnectionError(f"Failed to connect to LLM server after 3 attempts: {last_error}")
 
     def stream_chat(self, messages: list, temperature: Optional[float] = None,

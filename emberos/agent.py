@@ -97,6 +97,8 @@ _FILE_DELETE_KEYWORDS = (
     "delete the document", "remove the document",
     "get rid of", "erase the file", "erase file",
 )
+# Catches natural patterns like "delete marcus-email.txt" or "remove report.pdf on Desktop"
+_FILE_DELETE_PAT = re.compile(r'\b(?:delete|remove|erase)\s+(?:\w[\w.\-]+\.\w{2,5})')
 
 # ── New capability keyword groups ───────────────────────────────────────────
 
@@ -152,6 +154,12 @@ _FIND_OLD_KEYWORDS = ("old files", "oldest files", "find old files",
                         "files not modified", "stale files")
 _FIND_DUPES_KEYWORDS = ("duplicate files", "find duplicates", "find duplicate files",
                           "same files", "identical files", "dedup")
+_UNDO_KEYWORDS = (
+    "undo", "revert", "rollback", "roll back",
+    "turn things back", "put things back", "go back to how",
+    "restore original", "don't like it", "i don't like it",
+    "take it back", "undo organize", "undo the organize",
+)
 _GREP_KEYWORDS = ("search inside", "grep", "find text in", "search text in",
                     "look inside", "find in file", "search for text in")
 _DIFF_KEYWORDS = ("diff", "compare file", "compare the files", "what changed between",
@@ -222,6 +230,15 @@ _CREATE_DOC_KEYWORDS = (
     "make a report", "make a document", "convert that to a",
     "create a short summary", "create a full report", "create an executive summary",
     "create a structured", "create a professional report",
+    # Email / letter / memo types
+    "write an email", "draft an email", "compose an email",
+    "write a letter", "draft a letter", "compose a letter",
+    "write a memo", "draft a memo",
+    "write a follow-up", "draft a follow-up",
+    "write a short follow-up", "write a short email",
+    "write a message", "draft a message",
+    "write me an email", "write me a letter", "write me a follow-up",
+    "write me a short", "draft me an email", "draft me a letter",
 )
 
 _FOLDER_EXPLAIN_KEYWORDS = (
@@ -434,7 +451,8 @@ class EmberAgent:
         self._ctx: dict = {
             "last_dir": None,
             "last_files": [],
-            "last_doc_text": "",
+            "last_doc_text": "",    # summary/header shown to user
+            "last_doc_full": "",    # full raw document content for doc QA
             "last_summary": "",
             "last_output_path": None,
         }
@@ -520,11 +538,45 @@ class EmberAgent:
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
                 )
+                self._warmup_llm()
                 logger.info("Agent fully started")
             else:
                 logger.error("BitNet server failed to start")
         except FileNotFoundError as e:
             logger.warning("BitNet binary not found — agent running without local LLM: %s", e)
+
+    def _warmup_llm(self) -> None:
+        """Send a trivial request to prime the model's KV cache.
+
+        The first inference after a cold model load is error-prone on some
+        hardware (ConnectionResetError / OOM).  Warming up here means the
+        first real user request hits an already-initialised model.
+        If the warmup itself crashes BitNet, the server is restarted once
+        and a second warmup is attempted.
+        """
+        for attempt in range(2):
+            try:
+                self.llm.chat(
+                    [{"role": "user", "content": "hi"}],
+                    max_tokens=3,
+                )
+                logger.info("LLM warmup OK")
+                return
+            except Exception as exc:
+                logger.warning("LLM warmup failed (attempt %d): %s", attempt + 1, exc)
+                if attempt == 0:
+                    logger.info("Restarting BitNet after warmup failure...")
+                    if self.bitnet.restart_server():
+                        self.llm = LLMClient(
+                            host=self.config.server_host,
+                            port=self.bitnet.server_port,
+                            temperature=self.config.temperature,
+                            max_tokens=self.config.max_tokens,
+                        )
+                    else:
+                        logger.error("BitNet restart failed — LLM unavailable")
+                        return
+        logger.warning("LLM warmup could not complete — first user request may be slow")
 
     def stop(self) -> None:
         """Stop all agent components."""
@@ -619,6 +671,8 @@ class EmberAgent:
                         results.append(f"Failed to delete {path}: {e}")
                 self._ctx["last_files"] = []
                 return "\n".join(results) if results else "No files were deleted."
+            elif act == "undo_last":
+                return self.snapshot_mgr.rollback_last_batch()
             else:
                 return f"Unknown confirmed action: {act}"
         except Exception as e:
@@ -657,6 +711,7 @@ class EmberAgent:
             "find_large_files":   self._handle_find_large_files,
             "find_old_files":     self._handle_find_old_files,
             "find_duplicates":    self._handle_find_duplicates,
+            "undo":               self._handle_undo,
             "smart_organize":     self._handle_smart_organize,
             # --- Tasks ---
             "list_tasks":         self._handle_task_list,
@@ -771,6 +826,18 @@ class EmberAgent:
         if app_result is not None:
             return app_result
 
+        # Specific file-ops searches — must precede generic _handle_file_find
+        # so "find duplicate files" / "find large files" are not swallowed by
+        # the broad "find files" keyword in _FILE_FIND_KEYWORDS.
+        if any(kw in lower for kw in _FIND_DUPES_KEYWORDS):
+            return self._handle_find_duplicates(user_input)
+        if any(kw in lower for kw in _FIND_LARGE_KEYWORDS):
+            return self._handle_find_large_files(user_input)
+        if any(kw in lower for kw in _FIND_OLD_KEYWORDS):
+            return self._handle_find_old_files(user_input)
+        if any(kw in lower for kw in _UNDO_KEYWORDS):
+            return self._handle_undo(user_input)
+
         # File finding — direct Python, no LLM needed
         file_find = self._handle_file_find(user_input)
         if file_find is not None:
@@ -803,6 +870,97 @@ class EmberAgent:
         if file_org is not None:
             return file_org
 
+        # ── Deterministic ops — run before LLM routing ───────────────────────
+        # All of these are pure local operations. Moving them here ensures they
+        # work whether or not BitNet is available, without growing fallback lists.
+
+        # File summarization
+        if any(kw in lower for kw in _FILE_SUMMARIZE_KEYWORDS):
+            result = self._handle_file_summarize(user_input)
+            if result is not None:
+                return result
+
+        # Smart content-aware organization
+        if any(kw in lower for kw in _SMART_ORGANIZE_KEYWORDS):
+            return self._handle_smart_organize(user_input)
+
+        # Batch delete from context ("delete those files", "remove all of them")
+        if any(kw in lower for kw in _BATCH_DELETE_KEYWORDS):
+            result = self._handle_batch_delete(user_input)
+            if result is not None:
+                return result
+
+        # File deletion — keyword match OR naturalistic "delete X.ext" pattern
+        if any(kw in lower for kw in _FILE_DELETE_KEYWORDS) or _FILE_DELETE_PAT.search(lower):
+            result = self._handle_file_delete(user_input)
+            if result is not None:
+                return result
+
+        # Screenshot
+        if any(kw in lower for kw in _SCREENSHOT_KEYWORDS):
+            return self._handle_screenshot(user_input)
+
+        # Volume
+        if any(kw in lower for kw in _VOLUME_UP_KEYWORDS):
+            return self._handle_volume("up", user_input)
+        if any(kw in lower for kw in _VOLUME_DOWN_KEYWORDS):
+            return self._handle_volume("down", user_input)
+        if any(kw in lower for kw in _MUTE_KEYWORDS):
+            return self._handle_mute()
+
+        # Dark mode / theme
+        if any(kw in lower for kw in _DARK_MODE_KEYWORDS):
+            return self._handle_dark_mode(user_input)
+
+        # Brightness
+        if any(kw in lower for kw in _BRIGHTNESS_KEYWORDS):
+            return self._handle_brightness(user_input)
+
+        # Battery
+        if any(kw in lower for kw in _BATTERY_KEYWORDS):
+            from use_cases.system_queries import get_battery_status
+            return get_battery_status()
+
+        # Screen lock / sleep / power
+        if any(kw in lower for kw in _LOCK_KEYWORDS):
+            from use_cases.system_queries import lock_screen
+            return lock_screen()
+        if any(kw in lower for kw in _SLEEP_KEYWORDS):
+            from use_cases.system_queries import sleep_system
+            return sleep_system()
+        if any(kw in lower for kw in _SHUTDOWN_KEYWORDS):
+            return self._handle_power("shutdown", user_input)
+        if any(kw in lower for kw in _RESTART_KEYWORDS):
+            return self._handle_power("restart", user_input)
+
+        # Window management
+        if any(kw in lower for kw in _WINDOW_LIST_KEYWORDS):
+            from use_cases.system_queries import get_open_windows
+            return get_open_windows()
+        if any(kw in lower for kw in _WINDOW_MIN_KEYWORDS):
+            from use_cases.system_queries import minimize_all_windows
+            return minimize_all_windows()
+        if any(kw in lower for kw in _WINDOW_FOCUS_KEYWORDS):
+            return self._handle_window_focus(user_input)
+
+        # Archive operations
+        if any(kw in lower for kw in _COMPRESS_KEYWORDS):
+            return self._handle_compress(user_input)
+        if any(kw in lower for kw in _EXTRACT_KEYWORDS):
+            return self._handle_extract(user_input)
+
+        # Content search across folder
+        if any(kw in lower for kw in _CONTENT_SEARCH_KEYWORDS):
+            return self._handle_content_search(user_input)
+
+        # In-file content search / analysis
+        if any(kw in lower for kw in _GREP_KEYWORDS):
+            return self._handle_grep(user_input)
+        if any(kw in lower for kw in _DIFF_KEYWORDS):
+            return self._handle_diff(user_input)
+        if any(kw in lower for kw in _EXTRACT_PATTERNS_KEYWORDS):
+            return self._handle_extract_patterns(user_input)
+
         # ── LLM-based routing (primary path) ─────────────────────────────────
         # The LLM reads a compact tool manifest and picks the right handler.
         # This replaces the need to keep growing the keyword lists below.
@@ -812,12 +970,18 @@ class EmberAgent:
             return manifest_result
 
         # ── Keyword fallback (when LLM is unavailable) ────────────────────────
-        if "folder" in lower and any(kw in lower for kw in _FILE_SUMMARIZE_KEYWORDS):
-            return self._handle_list_dir(user_input)
-
         # File summarization ("what's in X.pdf", "summarize report.docx in E:\Quant")
         if any(kw in lower for kw in _FILE_SUMMARIZE_KEYWORDS):
             result = self._handle_file_summarize(user_input)
+            if result is not None:
+                return result
+
+        # Document follow-up questions (LLM offline — search stored document context)
+        if (self._ctx.get("last_doc_text")
+                and lower.split()
+                and lower.split()[0] in {"what", "who", "how", "why", "when", "where",
+                                          "explain", "tell", "describe", "which", "show"}):
+            result = self._handle_doc_qa(user_input)
             if result is not None:
                 return result
 
@@ -949,6 +1113,18 @@ class EmberAgent:
 
         return None
 
+    def _store_doc_context(self, file_path: str, summary: str) -> None:
+        """Store summary + raw content into conversation context for follow-up doc_qa."""
+        from pathlib import Path as _Path
+        self._ctx["last_doc_text"] = summary
+        try:
+            from use_cases.file_analysis import _read_full
+            raw = _read_full(_Path(file_path), max_chars=25000)
+            if raw and not raw[:60].lower().startswith(("[binary", "[image", "error")):
+                self._ctx["last_doc_full"] = raw
+        except Exception:
+            pass
+
     def _handle_file_summarize(self, user_input: str) -> Optional[str]:
         """Find a file from a natural-language description and summarize its contents."""
         from use_cases.file_analysis import summarize_file, find_similar_files
@@ -956,13 +1132,77 @@ class EmberAgent:
         from pathlib import Path
 
         filename, search_root = _parse_file_query(user_input)
+
+        # --- Vague/no-extension reference: "summarize the proposal", "read that PDF" ---
         if not filename:
-            return None  # couldn't parse a filename — let LLM handle it
+            # Extract keywords by stripping action words, prepositions, and known folder names
+            import re as _re
+            _ACTION = frozenset({
+                "summarize", "read", "open", "show", "explain", "describe",
+                "what", "what's", "whats", "tell", "me", "about", "is", "in",
+                "the", "a", "an", "my", "that", "this", "it", "its", "please",
+                "give", "get", "fetch", "look", "at", "for", "can", "you",
+                "folder", "directory", "file", "document",
+                "downloads", "documents", "desktop", "pictures", "videos", "music",
+            })
+            words = [w for w in _re.sub(r'[^\w\s]', '', user_input.lower()).split()
+                     if w not in _ACTION and len(w) > 2]
+
+            if not words:
+                return None  # nothing to search for
+
+            # Resolve folder from query
+            folder = self._resolve_folder_from_text(user_input.lower(), user_input)
+            home = os.path.expanduser("~")
+            search_dirs = [folder] if folder else [
+                os.path.join(home, "Downloads"),
+                os.path.join(home, "Documents"),
+                os.path.join(home, "Desktop"),
+            ]
+
+            _DOC_EXTS = {".pdf", ".docx", ".txt", ".md", ".xlsx", ".pptx", ".csv"}
+            matches = []
+            for d in search_dirs:
+                if not d or not os.path.isdir(d):
+                    continue
+                try:
+                    for entry in os.listdir(d):
+                        p = os.path.join(d, entry)
+                        if not os.path.isfile(p):
+                            continue
+                        ext = Path(entry).suffix.lower()
+                        if ext not in _DOC_EXTS:
+                            continue
+                        stem = Path(entry).stem.lower()
+                        if any(kw in stem for kw in words):
+                            matches.append(p)
+                except OSError:
+                    pass
+                if matches:
+                    break
+
+            if not matches:
+                return None  # let LLM handle it
+            if len(matches) == 1:
+                result = summarize_file(matches[0], llm_client=self.llm)
+                if result is not None:
+                    self._store_doc_context(matches[0], result)
+                    return result
+            # Multiple keyword matches — pick the best one (most keyword overlap)
+            best = max(matches, key=lambda p: sum(
+                kw in Path(p).stem.lower() for kw in words
+            ))
+            result = summarize_file(best, llm_client=self.llm)
+            if result is not None:
+                self._store_doc_context(best, result)
+                return result
+            return None
 
         # --- Case 1: absolute path was given ---
         if os.path.isabs(filename) or (len(filename) > 2 and filename[1] == ':'):
             result = summarize_file(filename, llm_client=self.llm)
             if result is not None:
+                self._store_doc_context(filename, result)
                 return result
             suggestions = find_similar_files(
                 os.path.basename(filename),
@@ -979,6 +1219,7 @@ class EmberAgent:
             candidate = os.path.join(search_root, filename)
             result = summarize_file(candidate, llm_client=self.llm)
             if result is not None:
+                self._store_doc_context(candidate, result)
                 return result
 
             # Recursive search inside search_root
@@ -988,6 +1229,7 @@ class EmberAgent:
                     for p in root_path.rglob(filename):
                         r = summarize_file(str(p), llm_client=self.llm)
                         if r is not None:
+                            self._store_doc_context(str(p), r)
                             return r
                         break
                 except (PermissionError, OSError):
@@ -1022,12 +1264,14 @@ class EmberAgent:
             p = Path(root) / filename
             result = summarize_file(str(p), llm_client=self.llm)
             if result is not None:
+                self._store_doc_context(str(p), result)
                 return result
             # Shallow rglob (2 levels) to avoid scanning whole drive
             try:
                 for found in Path(root).rglob(filename):
                     r = summarize_file(str(found), llm_client=self.llm)
                     if r is not None:
+                        self._store_doc_context(str(found), r)
                         return r
                     break
             except (PermissionError, OSError):
@@ -1418,6 +1662,7 @@ class EmberAgent:
             return None
 
         import os
+        from pathlib import Path
         home = os.path.expanduser("~")
         folder = None
         for folder_kw, folder_path in [
@@ -1433,28 +1678,31 @@ class EmberAgent:
         if not folder:
             return None
 
-        from use_cases.file_ops import organize_folder_by_type
-        result = organize_folder_by_type(folder, preview_only=True)
+        from use_cases.file_ops import smart_organize_folder
+        result = smart_organize_folder(folder, llm_client=self.llm, preview_only=True)
 
         if "error" in result:
             return result["error"]
 
-        preview = result.get("preview", {})
+        groups = result.get("groups", {})
         total = result.get("total_files", 0)
 
         if total == 0:
-            return f"No files to organize in {folder}."
+            return f"No files to organize in {Path(folder).name}."
 
-        lines = [f"Here's what organizing {os.path.basename(folder)} by file type would do:"]
-        for cat, count in sorted(preview.items(), key=lambda x: -x[1]):
-            lines.append(f"  {count} file(s) → {cat}/")
-        lines.append(f"\nTotal: {total} file(s) will be moved.")
+        lines = [f"Here's how I'll organize {Path(folder).name} ({total} file(s)):\n"]
+        for group_name, files in groups.items():
+            lines.append(f"  [{group_name}/]  — {len(files)} file(s)")
+            for fname in files[:4]:
+                lines.append(f"      • {fname}")
+            if len(files) > 4:
+                lines.append(f"      ... and {len(files) - 4} more")
         lines.append("\nShall I proceed? (yes/no)")
 
         self.pending_confirmation = {
-            "action": "organize_folder",
+            "action": "smart_organize",
             "params": {"folder": folder},
-            "description": f"Organize folder: {folder}",
+            "description": f"Organize folder: {Path(folder).name}",
         }
         return "\n".join(lines)
 
@@ -1636,7 +1884,7 @@ class EmberAgent:
 
         task = self._task_mgr.add(title, due, priority)
         due_str = f" (due: {due})" if due else ""
-        return f"Task #{task['id']} added: {task['title']}{due_str} [{task['priority']}]"
+        return f"Task added: {task['title']}{due_str}"
 
     def _handle_task_list(self, user_input: str) -> str:
         from use_cases.tasks import time_until_due
@@ -1646,69 +1894,76 @@ class EmberAgent:
         if not tasks:
             return "No tasks found." if show_all else "You have no pending tasks."
         lines = []
-        for t in tasks:
+        for i, t in enumerate(tasks, 1):
             done = "[x]" if t["completed"] else "[ ]"
             pri = f" [{t['priority']}]" if t["priority"] != "normal" else ""
             due_str = f" — due: {time_until_due(t['due_date'])}" if t["due_date"] else ""
-            lines.append(f"  #{t['id']} {done}{pri} {t['title']}{due_str}")
+            lines.append(f"  #{i} {done}{pri} {t['title']}{due_str}")
         label = "All tasks" if show_all else f"Pending tasks ({self._task_mgr.count_pending()})"
         return f"{label}:\n" + "\n".join(lines)
 
     def _handle_task_complete(self, user_input: str) -> str:
         import re as _re
-        # Try by ID first
         m = _re.search(r'#?(\d+)', user_input)
         if m:
-            task_id = int(m.group(1))
-            task = self._task_mgr.complete(task_id)
-            if task is None:
-                return f"Task #{task_id} not found or already completed."
-            return f"Task #{task_id} marked as done: {task['title']}"
-        # Extract title: strip leading action words + trailing "task(s)"
+            n = int(m.group(1))
+            pending = self._task_mgr.list_pending()
+            if n < 1 or n > len(pending):
+                return f"No task #{n}. You have {len(pending)} pending task(s)."
+            task = self._task_mgr.complete(pending[n - 1]["id"])
+            return f"Marked as done: {pending[n - 1]['title']}"
+        # Title-based lookup
         title = _re.sub(
             r'^(?:complete|done|finish|mark|finished|close|done with|mark as done)\s+',
             '', user_input.strip(), flags=_re.IGNORECASE,
         )
         title = _re.sub(r'\s+tasks?\s*$', '', title, flags=_re.IGNORECASE).strip()
         if not title:
-            return "Please specify a task ID or name, e.g. 'complete task #3' or 'done review invoice task'"
+            return "Please specify a task number or name, e.g. 'complete task #1' or 'done review invoice task'"
         matches = self._task_mgr.search(title)
         pending = [t for t in matches if not t["completed"]]
         if not pending:
             return f"No pending task found matching '{title}'."
         if len(pending) == 1:
-            task = self._task_mgr.complete(pending[0]["id"])
+            self._task_mgr.complete(pending[0]["id"])
             return f"Marked as done: {pending[0]['title']}"
-        lines = [f"Multiple tasks match '{title}'. Specify by ID:"]
+        all_pending = self._task_mgr.list_pending()
+        lines = [f"Multiple tasks match '{title}'. Specify by number:"]
         for t in pending[:5]:
-            lines.append(f"  #{t['id']} {t['title']}")
+            pos = next((i + 1 for i, p in enumerate(all_pending) if p["id"] == t["id"]), t["id"])
+            lines.append(f"  #{pos} {t['title']}")
         return "\n".join(lines)
 
     def _handle_task_remove(self, user_input: str) -> str:
         import re as _re
-        # Try by ID first
         m = _re.search(r'#?(\d+)', user_input)
         if m:
-            task_id = int(m.group(1))
-            removed = self._task_mgr.remove(task_id)
-            return f"Task #{task_id} deleted." if removed else f"Task #{task_id} not found."
-        # Extract title: strip leading action words + trailing "task(s)"
+            n = int(m.group(1))
+            pending = self._task_mgr.list_pending()
+            if n < 1 or n > len(pending):
+                return f"No task #{n}. You have {len(pending)} pending task(s)."
+            removed = self._task_mgr.remove(pending[n - 1]["id"])
+            return f"Removed: {pending[n - 1]['title']}" if removed else "Could not remove task."
+        # Title-based lookup
         title = _re.sub(
             r'^(?:clear|remove|delete|erase|drop)\s+',
             '', user_input.strip(), flags=_re.IGNORECASE,
         )
         title = _re.sub(r'\s+tasks?\s*$', '', title, flags=_re.IGNORECASE).strip()
         if not title:
-            return "Please specify a task ID or name, e.g. 'remove task #2' or 'clear review invoice task'"
+            return "Please specify a task number or name, e.g. 'remove task #1' or 'clear review invoice task'"
         matches = self._task_mgr.search(title)
         if not matches:
             return f"No task found matching '{title}'."
         if len(matches) == 1:
             removed = self._task_mgr.remove(matches[0]["id"])
             return f"Removed: {matches[0]['title']}" if removed else "Could not remove task."
-        lines = [f"Multiple tasks match '{title}'. Specify by ID:"]
+        all_pending = self._task_mgr.list_pending()
+        lines = [f"Multiple tasks match '{title}'. Specify by number:"]
         for t in matches[:5]:
-            lines.append(f"  #{t['id']} {t['title']}")
+            pos = next((i + 1 for i, p in enumerate(all_pending) if p["id"] == t["id"]), t["id"])
+            lines.append(f"  #{pos} {t['title']}")
+        return "\n".join(lines)
         return "\n".join(lines)
 
     def _handle_task_clear(self, user_input: str = "") -> str:
@@ -1850,6 +2105,41 @@ class EmberAgent:
                 lines.append(f"    • {p}")
         return "\n".join(lines)
 
+    def _handle_undo(self, user_input: str) -> str:
+        """Show a preview of the last operation and ask for confirmation to undo it."""
+        batch = self.snapshot_mgr.peek_last_batch()
+        if not batch:
+            return "Nothing to undo — no recent operations found."
+
+        ref_op = batch[0].get("operation", "unknown")
+        op_labels = {
+            "smart_organize": "smart organize",
+            "organize": "organize by type",
+            "delete": "delete",
+            "move": "move",
+            "rename": "rename",
+        }
+        op_label = op_labels.get(ref_op, ref_op)
+
+        from pathlib import Path as _P
+        lines = [
+            f"This will undo the last '{op_label}' ({len(batch)} file(s)):",
+        ]
+        for s in batch[:6]:
+            parent = _P(s["original_path"]).parent.name
+            name = _P(s["original_path"]).name
+            lines.append(f"  • {name}  →  {parent}/")
+        if len(batch) > 6:
+            lines.append(f"  ... and {len(batch) - 6} more")
+        lines.append("\nType 'yes' to restore everything, or 'no' to cancel.")
+
+        self.pending_confirmation = {
+            "action": "undo_last",
+            "description": f"undo {op_label}",
+            "params": {},
+        }
+        return "\n".join(lines)
+
     def _handle_grep(self, user_input: str) -> str:
         from use_cases.file_analysis import grep_file
         filename, search_root = _parse_file_query(user_input)
@@ -1958,6 +2248,7 @@ class EmberAgent:
                 doc_text = _read_full(Path(matches[0]["path"]), max_chars=15000)
                 if doc_text and not doc_text.startswith("[Binary") and not doc_text.startswith("[Image"):
                     self._ctx["last_doc_text"] = doc_text
+                    self._ctx["last_doc_full"] = doc_text
             except Exception:
                 pass
 
@@ -2083,10 +2374,11 @@ class EmberAgent:
 
         _BASE_PAT = r"(downloads|documents|desktop|pictures|videos|music)"
 
-        # 1a. "the/my X folder [,] in [the/my] Y"  — hyphens OK, no spaces in name
+        # 1a. "the/my X folder [, words] in [the/my] Y"  — hyphens OK, no spaces in name
         #     (spaces excluded to avoid matching across "the files in the demo-files folder")
+        #     Allows 0-2 extra words between "folder" and "in" (e.g. "folder, present in")
         m = _re.search(
-            r'\b(?:my|the)\s+([\w][\w\-]*)\s+folder\s*,?\s*'
+            r'\b(?:my|the)\s+([\w][\w\-]*)\s+folder\s*,?\s*(?:\w+\s+){0,2}?'
             r'(?:in|inside)\s+(?:the\s+|my\s+)?' + _BASE_PAT,
             text_lower,
         )
@@ -2111,10 +2403,11 @@ class EmberAgent:
                 if bp:
                     return _scan(sub, bp) or os.path.join(bp, sub)
 
-        # 1c. "X folder in Y"  — no my/the required, single/hyphenated name only
+        # 1c. "X folder [, words] in Y"  — no my/the required, single/hyphenated name only
         #     Disk-only: only returns if the subfolder actually exists (avoids false positives)
+        #     Allows 0-2 extra words between "folder" and "in" (e.g. "folder, present in")
         m = _re.search(
-            r'\b([\w][\w\-]+)\s+folder\s*,?\s*'
+            r'\b([\w][\w\-]+)\s+folder\s*,?\s*(?:\w+\s+){0,2}?'
             r'(?:in|inside)\s+(?:the\s+|my\s+)?' + _BASE_PAT,
             text_lower,
         )
@@ -2229,6 +2522,68 @@ class EmberAgent:
             return self._execute_create_doc(params)
         return f"[Unknown clarification intent: {intent}]"
 
+    def _offline_doc_template(self, topic: str, reference_text: str = "") -> str:
+        """Generate a basic document template without the LLM.
+
+        Parses names, amounts, and key actions from the topic text and produces
+        a short professional email or a plain structured document as appropriate.
+        """
+        import re as _re
+        lower = topic.lower()
+
+        is_email = any(w in lower for w in ("email", "e-mail", "follow-up", "follow up", "letter", "memo"))
+
+        # Extract recipient name: "to <Name>" where Name starts with a capital
+        name_m = _re.search(r'\bto\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', topic)
+        recipient = name_m.group(1) if name_m else ""
+
+        # Extract dollar amounts from topic + snippet of reference
+        combined = topic + " " + reference_text[:600]
+        amounts = _re.findall(r'\$[\d,]+(?:\.\d{2})?(?:/\w+)?', combined)
+        amounts = list(dict.fromkeys(amounts))  # deduplicate, preserve order
+
+        # Strip the leading verb-phrase to get the body of the request
+        body = _re.sub(
+            r'^(?:please\s+)?(?:can you\s+)?(?:write|draft|create|compose|send)\s+(?:a\s+|an\s+)?'
+            r'(?:short\s+|brief\s+|quick\s+)?(?:follow-?up\s+)?(?:email|letter|memo|message|document|report)\s+',
+            '', topic, flags=_re.IGNORECASE,
+        ).strip()
+        # Drop "to <Name>" now that recipient is captured separately
+        body = _re.sub(r'^to\s+[A-Z][a-z]+\s+', '', body).strip()
+        # Drop save-path directive at the end
+        body = _re.sub(r'[.,]?\s+(?:save|store)\s+it\s+to\b.*', '', body, flags=_re.IGNORECASE).strip()
+
+        # Split composite actions on "and" for bullet points
+        action_parts = [p.strip() for p in _re.split(r'\s+and\s+', body, flags=_re.IGNORECASE) if p.strip()]
+
+        if is_email:
+            subject_amount = amounts[0] if amounts else ""
+            subject = f"Follow-up{' — ' + subject_amount if subject_amount else ''}"
+            greeting = f"Dear {recipient}," if recipient else "Hello,"
+
+            if len(action_parts) > 1:
+                bullet_lines = ["I wanted to reach out to:"]
+                for part in action_parts:
+                    bullet_lines.append(f"  - {part.capitalize()}")
+                body_text = "\n".join(bullet_lines)
+            else:
+                body_text = f"I wanted to {body}."
+
+            return "\n".join([
+                f"Subject: {subject}",
+                "",
+                greeting,
+                "",
+                body_text,
+                "",
+                "Please let me know if you have any questions.",
+                "",
+                "Best regards",
+            ])
+
+        # Generic document
+        return f"# Document\n\n{body or topic}"
+
     def _execute_create_doc(self, params: dict) -> str:
         """Generate document content (if needed) and write the file."""
         from use_cases.doc_gen import write_document
@@ -2278,7 +2633,9 @@ class EmberAgent:
                     ])
                 except Exception as e:
                     logger.warning("LLM content generation failed: %s", e)
-                    content = topic
+            # Offline fallback: generate a basic template when LLM is unavailable or failed
+            if not content and topic:
+                content = self._offline_doc_template(topic, reference_text)
             if not content:
                 return "No content to write — please provide a topic or run a folder summary first."
 
@@ -2584,17 +2941,22 @@ class EmberAgent:
             "for that invoice", "for that document", "for that file",
             "acknowledging receipt", "acknowledging their",
             "following up on", "follow up on",
+            "confirming the", "to confirm",
         )
         has_reference_trigger = any(t in lower for t in _REFERENCE_TRIGGERS)
 
-        if has_reference_trigger and self._ctx.get("last_doc_text"):
+        # Prefer full raw content for richer context; fall back to summary/text
+        _ctx_ref = self._ctx.get("last_doc_full") or self._ctx.get("last_doc_text", "")
+
+        if has_reference_trigger and _ctx_ref:
             # Use the previously loaded document as reference material
             params["topic"] = user_input
-            params["reference_text"] = self._ctx["last_doc_text"][:4000]
+            params["reference_text"] = _ctx_ref[:4000]
         elif self._ctx.get("last_summary"):
             params["content"] = self._ctx["last_summary"]
-        elif self._ctx.get("last_doc_text"):
-            params["topic"] = user_input + "\n\n" + self._ctx["last_doc_text"][:3000]
+        elif _ctx_ref:
+            params["topic"] = user_input
+            params["reference_text"] = _ctx_ref[:3000]
         else:
             params["topic"] = user_input
 
@@ -2666,27 +3028,64 @@ class EmberAgent:
 
     def _handle_doc_qa(self, user_input: str) -> Optional[str]:
         """Answer a question using the currently loaded document context."""
+        # Prefer full raw content for richer answers; fall back to stored summary
+        doc_full = self._ctx.get("last_doc_full", "")
         doc_text = self._ctx.get("last_doc_text") or self._ctx.get("last_summary", "")
-        if not doc_text:
+        if not doc_full and not doc_text:
             return None  # no document context — let LLM handle it
 
-        if not self.llm:
-            return "LLM unavailable — cannot answer document questions."
+        # Use raw content for LLM (more material) but cap to keep prompt in context window
+        llm_content = (doc_full or doc_text)[:8000]
 
+        if self.llm:
+            try:
+                prompt = (
+                    f"User question: {user_input}\n\n"
+                    "Based only on the following document content, answer the question:\n\n"
+                    + llm_content
+                )
+                answer = self.llm.chat([
+                    {"role": "system",
+                     "content": "You are a document analyst. Answer questions based only on the provided document content."},
+                    {"role": "user", "content": prompt},
+                ])
+                return answer.strip()
+            except Exception:
+                pass  # fall through to text search
+
+        # LLM unavailable — find relevant sentences by keyword overlap
+        import re as _re
+        _STOP = frozenset({
+            "what", "exactly", "do", "the", "a", "an", "is", "are", "in", "of",
+            "and", "or", "how", "where", "when", "why", "which", "that", "this",
+            "it", "was", "say", "says", "tell", "me", "about", "can", "you",
+            "does", "did", "have", "has", "any", "please", "give",
+        })
+        words = [w.lower() for w in _re.sub(r'[^\w\s]', '', user_input).split()
+                 if w.lower() not in _STOP and len(w) > 2]
+        if not words:
+            return None
+
+        # Search in full raw content when available for broader coverage
+        search_text = doc_full or doc_text
+
+        # Split into sentences for fine-grained matching
         try:
-            prompt = (
-                f"User question: {user_input}\n\n"
-                "Based only on the following document content, answer the question:\n\n"
-                + doc_text[:8000]
-            )
-            answer = self.llm.chat([
-                {"role": "system",
-                 "content": "You are a document analyst. Answer questions based only on the provided document content."},
-                {"role": "user", "content": prompt},
-            ])
-            return answer.strip()
-        except Exception as e:
-            return f"[LLM unavailable: {e}]"
+            from use_cases.file_analysis import _split_sentences
+            sentences = _split_sentences(search_text.replace('\n', ' '))
+        except Exception:
+            sentences = [l.strip() for l in search_text.splitlines()
+                         if l.strip() and len(l.split()) >= 4]
+        if not sentences:
+            return None
+
+        scored = [(sum(1 for w in words if w in s.lower()), s) for s in sentences]
+        scored.sort(key=lambda x: -x[0])
+        matches = [s for score, s in scored[:8] if score > 0]
+        if not matches:
+            return None
+
+        return "Based on the document:\n\n" + "\n".join(matches[:5])
 
     # ── Main Processing ──────────────────────────────────────────
 

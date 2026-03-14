@@ -130,10 +130,6 @@ def load_config() -> Config:
     if cfg.threads == 0:
         cfg.threads = cpu_count
 
-    # Set gpu_layers based on gpu_mode
-    if cfg.gpu_mode == "cuda" and cfg.gpu_layers == 0:
-        cfg.gpu_layers = 99
-
     return cfg
 
 

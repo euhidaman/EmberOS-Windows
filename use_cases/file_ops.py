@@ -25,6 +25,7 @@ _FILE_CATEGORIES = {
     "Videos": {".mp4", ".mkv", ".avi", ".mov", ".wmv"},
     "Audio": {".mp3", ".wav", ".flac", ".aac", ".ogg"},
     "Archives": {".zip", ".tar", ".gz", ".bz2", ".7z", ".rar"},
+    "Software": {".exe", ".msi", ".msix", ".appx", ".appxbundle"},
     "Code": {".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".rs", ".go", ".html", ".css"},
 }
 
@@ -288,8 +289,14 @@ def _group_docs_by_llm(doc_files: list, llm_client) -> dict | None:
         lines.append(f"- {f.name}: {excerpt}")
 
     prompt = (
-        "Group the files below into 2-6 thematic folders based on their content.\n"
-        "Reply with ONLY lines in this exact format (no JSON, no explanation):\n"
+        "Group the files below into meaningful folders based on their content.\n"
+        "Rules:\n"
+        "- Research papers, academic or scientific documents → use 'Research' or a topic name.\n"
+        "- Invoices, proposals, contracts, briefs → use the company or client name as the folder "
+        "(e.g. 'Fieldmark', 'Acme Corp'). If there are multiple companies, create a folder per company.\n"
+        "- Demo, marketing, or promotional content → 'Marketing' or 'Demos'.\n"
+        "- Avoid generic names like 'Documents', 'Misc', or 'Files' unless nothing else fits.\n"
+        "Use 2-6 folders total. Reply with ONLY lines in this exact format (no JSON, no explanation):\n"
         "FolderName: file1.pdf, file2.txt\n\n"
         + "\n".join(lines)
     )
@@ -298,7 +305,12 @@ def _group_docs_by_llm(doc_files: list, llm_client) -> dict | None:
         response = llm_client.chat(
             [
                 {"role": "system",
-                 "content": "You organise files into folders. Reply only with folder lines."},
+                 "content": (
+                     "You organize files into folders. "
+                     "Detect research papers and group them under Research or a topic name. "
+                     "Detect business documents and group them by company name. "
+                     "Reply only with folder lines."
+                 )},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=300,

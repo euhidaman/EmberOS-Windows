@@ -48,6 +48,12 @@ To boot EmberOS into proper background-service mode and open the system tray fun
 
 ## 🎮 Interfaces
 
+Current start up information in my development mode -->
+
+```cmd
+env\python-embed\python.exe -m emberos.service
+```
+
 Once the backend is live, command your agent easily using either GUI or CLI options:
 
 **Launch the CLI Terminal REPL:**

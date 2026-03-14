@@ -48,6 +48,7 @@ extract: Extract files from a ZIP or other archive
 find_large_files: Find the largest files on disk
 find_old_files: Find files that have not been accessed recently
 find_duplicates: Find duplicate files
+undo: Undo or revert the last file operation (organize, move, rename, delete)
 smart_organize: Organize a folder by grouping similar documents together and images by filename patterns
 diff_files: Show the line-by-line differences between two files
 extract_patterns: Extract emails, URLs, phone numbers, or dates from a file

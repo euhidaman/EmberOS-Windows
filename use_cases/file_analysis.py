@@ -122,6 +122,7 @@ def _read_pdf(path: Path) -> str:
                 if extracted:
                     text += extracted + "\n"
             text = text.strip()
+            text = re.sub(r'\(cid:\d+\)\s*', '', text)
             if len(text) > 15000:
                 return text[:15000] + "\n[... truncated]"
             return text if text else "PDF is empty or has no extractable text"
@@ -243,6 +244,8 @@ def _read_pdf_full(path: Path, max_chars: int = 25_000) -> str:
                 if extracted:
                     text += extracted + "\n"
             text = text.strip()
+            # Clean unresolved PDF glyph markers (e.g. (cid:127))
+            text = re.sub(r'\(cid:\d+\)\s*', '', text)
             if not text and page_count > 0:
                 plural = "s" if page_count != 1 else ""
                 return f"[Image PDF: {page_count} page{plural} — scanned document, no extractable text]"
@@ -390,42 +393,128 @@ def _chunked_summarize(content: str, filename: str, word_count: int,
         )
 
 
-def _extractive_summary(content: str, max_sentences: int = 5) -> str:
-    """Generate a simple extractive summary by selecting key sentences."""
-    # Fast preprocessing: normalize whitespace and remove line breaks
-    normalized = " ".join(content.split())
+_INLINE_SUMMARY_RX = re.compile(
+    r'^(?:Executive\s+)?(?:Summary|Abstract|Overview|Introduction)\s*[—\-:\.]\s*',
+    re.IGNORECASE,
+)
+_SUMMARY_HEADING_RX = re.compile(
+    r'^(?:Executive\s+)?(?:Summary|Abstract|Overview|Introduction)\s*$',
+    re.IGNORECASE,
+)
+_HEADING_LINE_RX = re.compile(
+    r'^(?:'
+    r'[A-Z][A-Z \d&:,\-]{4,}$'
+    r'|(?:Phase|Section|Chapter|Part|Step|Item)\b'
+    r'|\d+[\.\)]\s+\S'
+    r'|#{1,4}\s+\S'
+    r'|[A-Z][\w\s]+[:\-]\s*$'
+    r')'
+)
 
-    # Split into sentences more carefully
-    sentences = []
-    current = ""
-    for char in normalized:
-        current += char
-        if char in '.!?' and len(current.split()) > 3:
-            sentences.append(current.strip())
-            current = ""
 
-    if current.strip() and len(current.split()) > 3:
-        sentences.append(current.strip())
+def _extractive_summary(content: str, max_sentences: int = 8) -> str:
+    """Return a multi-sentence paragraph covering the full document.
 
-    if not sentences:
-        return content[:400]
+    Strategy:
+    1. Pull 2-3 sentences from the executive summary / abstract (inline marker).
+    2. Walk the remaining sections; contribute one key sentence per section.
+    3. Fallback: first substantive sentences, skipping short title fragments.
 
-    # Select diverse sentences: start, middle, end
-    summary_sentences = []
+    Result is up to max_sentences sentences joined into a single paragraph.
+    """
+    # Pre-clean unresolved PDF glyph markers that may survive through _read_full
+    lines = [re.sub(r'\(cid:\d+\)\s*', '', line).strip()
+             for line in content.splitlines()]
 
-    # First 1-2 sentences
-    summary_sentences.extend(sentences[:min(2, len(sentences))])
+    collected: list[str] = []
+    summary_end_idx = -1
 
-    # Middle sentence if document is long
-    if len(sentences) > 15:
-        mid_idx = len(sentences) // 2
-        summary_sentences.append(sentences[mid_idx])
+    # --- Pass 1: inline summary / abstract marker ---
+    for i, line in enumerate(lines):
+        if not line:
+            continue
+        m = _INLINE_SUMMARY_RX.match(line)
+        if not m:
+            continue
+        parts = [line[m.end():].strip()]
+        summary_end_idx = i
+        for j, cont in enumerate(lines[i + 1:], i + 1):
+            if not cont:
+                summary_end_idx = j
+                break
+            if _HEADING_LINE_RX.match(cont) and len(cont) < 120:
+                summary_end_idx = j
+                break
+            parts.append(cont)
+            summary_end_idx = j
+        body = " ".join(p for p in parts if p)
+        if len(body.split()) >= 6:
+            collected.extend(_split_sentences(body)[:3])
+        break
 
-    # Last sentence (often conclusions)
-    if len(sentences) > 5:
-        summary_sentences.append(sentences[-1])
+    # --- Pass 2: standalone "Summary" / "Abstract" heading block ---
+    if not collected:
+        in_block, block = False, []
+        for i, line in enumerate(lines):
+            if not line:
+                continue
+            if _SUMMARY_HEADING_RX.match(line):
+                in_block, block, summary_end_idx = True, [], i
+                continue
+            if in_block:
+                if _HEADING_LINE_RX.match(line) and len(line) < 120:
+                    break
+                block.append(line)
+                summary_end_idx = i
+        if block:
+            collected.extend(_split_sentences(" ".join(block))[:3])
 
-    return " ".join(summary_sentences)
+    # --- Pass 3: one key sentence per section heading (after the intro) ---
+    past_summary = summary_end_idx < 0
+    current_body: list[str] = []
+
+    for i, line in enumerate(lines):
+        if not past_summary:
+            if i > summary_end_idx:
+                past_summary = True
+            else:
+                continue
+        if not line:
+            continue
+        is_heading = bool(_HEADING_LINE_RX.match(line)) and len(line) < 120
+        if is_heading:
+            if current_body and len(collected) < max_sentences:
+                sents = _split_sentences(" ".join(current_body))
+                for s in sents:
+                    if len(s.split()) >= 6:
+                        collected.append(s)
+                        break
+            current_body = []
+        else:
+            current_body.append(line)
+
+    # Last section's body
+    if current_body and len(collected) < max_sentences:
+        sents = _split_sentences(" ".join(current_body))
+        for s in sents:
+            if len(s.split()) >= 6:
+                collected.append(s)
+                break
+
+    if collected:
+        return " ".join(collected[:max_sentences])
+
+    # --- Fallback: skip short title/author fragments ---
+    substantive = [l for l in lines if l and len(l.split()) >= 8]
+    text = " ".join(substantive) if substantive else " ".join(l for l in lines if l)
+    sents = _split_sentences(text)
+    return " ".join(sents[:4]) if sents else content[:500]
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences, keeping only those with 4+ words."""
+    parts = re.split(r'(?<=[.!?])\s+', text)
+    return [s.strip() for s in parts if len(s.split()) >= 4]
 
 
 def summarize_file(path: str, llm_client=None) -> str:
@@ -460,11 +549,7 @@ def summarize_file(path: str, llm_client=None) -> str:
     size = p.stat().st_size
     size_str = f"{size // 1024} KB" if size >= 1024 else f"{size} B"
     word_count = len(content.split())
-    header = f"{p.name}  ({size_str}, ~{word_count:,} words)"
-
-    # Very short — just show it verbatim
-    if len(content) <= 400:
-        return f"{p.name} ({size_str}):\n\n{content}"
+    header = f"Here is a summary of {p.name} ({size_str}, ~{word_count:,} words):"
 
     if llm_client:
         try:
@@ -481,23 +566,20 @@ def summarize_file(path: str, llm_client=None) -> str:
                              f"File: {p.name}\n\n{content}"
                          )},
                     ],
+                    max_tokens=600,
                 )
             else:
                 # Multi-pass chunked summarization for large documents
                 summary = _chunked_summarize(content, p.name, word_count, llm_client)
 
-            if summary:
+            if summary and summary.strip():
                 return f"{header}\n\n{summary.strip()}"
         except Exception:
             pass
 
-    # Fallback: clean text preview (no LLM)
-    lines = [l.rstrip() for l in content.split("\n") if l.strip()]
-    preview = "\n".join(lines[:20])
-    return (
-        f"{header}\n\nContent Preview:\n{preview}"
-        + ("\n\n[... truncated]" if len(lines) > 20 else "")
-    )
+    # Fallback: structure-aware extractive summary (no LLM or LLM failed)
+    extract = _extractive_summary(content)
+    return f"{header}\n\n{extract}"
 
 
 def find_similar_files(filename: str, search_roots: list = None) -> list:

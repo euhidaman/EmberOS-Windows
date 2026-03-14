@@ -84,6 +84,141 @@ class SnapshotManager:
         result.reverse()
         return result
 
+    def rollback_last_batch(self, window_seconds: int = 120) -> str:
+        """Rollback all snapshots from the most recent operation batch.
+
+        Groups snapshots by the same operation name and timestamp proximity
+        (within window_seconds of the newest snapshot).  After restoring files
+        to their original locations it removes any moved copies that still
+        exist in sub-directories, then cleans up empty sub-directories
+        that were created by the organize operation.
+
+        Returns a human-readable summary.
+        """
+        snapshots = self._get_snapshot_dirs()  # oldest → newest
+        if not snapshots:
+            return "Nothing to undo — no recent operations found."
+
+        # Reference point: the most recent snapshot
+        most_recent = snapshots[-1]
+        try:
+            with open(most_recent / "meta.json", "r", encoding="utf-8") as f:
+                ref_meta = json.load(f)
+        except Exception as e:
+            return f"Could not read snapshot metadata: {e}"
+
+        ref_dt = datetime.fromisoformat(ref_meta["timestamp"])
+        ref_op = ref_meta.get("operation", "")
+
+        # Collect the batch — same operation, within the time window
+        batch: list[tuple[Path, dict]] = []
+        for snap_dir in reversed(snapshots):  # newest → oldest
+            try:
+                with open(snap_dir / "meta.json", "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+            snap_dt = datetime.fromisoformat(meta["timestamp"])
+            if (ref_dt - snap_dt).total_seconds() > window_seconds:
+                break
+            if meta.get("operation") != ref_op:
+                continue
+            batch.append((snap_dir, meta))
+
+        if not batch:
+            return "No operation found to undo."
+
+        # Restore every file to its original location
+        original_parents: set[Path] = set()
+        restored_names: list[str] = []
+        failed_names: list[str] = []
+
+        for snap_dir, meta in batch:
+            orig_path = Path(meta["original_path"])
+            original_parents.add(orig_path.parent)
+            msg = self._restore(snap_dir)
+            if msg.startswith("Restored:"):
+                restored_names.append(orig_path.name)
+            else:
+                failed_names.append(orig_path.name)
+
+        # Remove the moved copies still sitting in organize sub-directories.
+        # After _restore the file is back at original_path; the copy inside the
+        # sub-folder created by organize is now a duplicate — delete it.
+        removed_dupes: list[str] = []
+        for parent in original_parents:
+            if not parent.exists():
+                continue
+            restored_here = {n for n in restored_names if (parent / n).exists()}
+            try:
+                for subdir in parent.iterdir():
+                    if not subdir.is_dir():
+                        continue
+                    for f in list(subdir.iterdir()):
+                        if f.is_file() and f.name in restored_here:
+                            try:
+                                f.unlink()
+                                removed_dupes.append(f.name)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+        # Remove sub-directories that are now empty
+        emptied_dirs: list[str] = []
+        for parent in original_parents:
+            if not parent.exists():
+                continue
+            try:
+                for subdir in parent.iterdir():
+                    if subdir.is_dir() and not any(subdir.iterdir()):
+                        shutil.rmtree(str(subdir), ignore_errors=True)
+                        emptied_dirs.append(subdir.name)
+            except Exception:
+                pass
+
+        lines = [
+            f"Undone: {len(restored_names)} file(s) moved back to their "
+            "original location(s)."
+        ]
+        if emptied_dirs:
+            dir_list = ", ".join(emptied_dirs[:5])
+            lines.append(
+                f"Removed {len(emptied_dirs)} empty folder(s): {dir_list}"
+            )
+        if failed_names:
+            lines.append(f"Note: {len(failed_names)} file(s) could not be restored.")
+        return "\n".join(lines)
+
+    def peek_last_batch(self, window_seconds: int = 120) -> list[dict]:
+        """Return metadata for the most recent operation batch without restoring."""
+        snapshots = self._get_snapshot_dirs()
+        if not snapshots:
+            return []
+        try:
+            with open(snapshots[-1] / "meta.json", "r", encoding="utf-8") as f:
+                ref_meta = json.load(f)
+        except Exception:
+            return []
+
+        ref_dt = datetime.fromisoformat(ref_meta["timestamp"])
+        ref_op = ref_meta.get("operation", "")
+
+        batch: list[dict] = []
+        for snap_dir in reversed(snapshots):
+            try:
+                with open(snap_dir / "meta.json", "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+            snap_dt = datetime.fromisoformat(meta["timestamp"])
+            if (ref_dt - snap_dt).total_seconds() > window_seconds:
+                break
+            if meta.get("operation") != ref_op:
+                continue
+            batch.append(meta)
+        return batch
+
     def has_snapshots(self) -> bool:
         return len(self._get_snapshot_dirs()) > 0
 

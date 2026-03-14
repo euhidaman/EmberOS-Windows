@@ -730,7 +730,6 @@ def _repl_loop():
     # Set up prompt-toolkit session with file-backed history
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
-    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.styles import Style as PTStyle
 
     history_file = ROOT_DIR / "data" / "cli_history"
@@ -738,7 +737,6 @@ def _repl_loop():
 
     session = PromptSession(
         history=FileHistory(str(history_file)),
-        auto_suggest=AutoSuggestFromHistory(),
         style=PTStyle.from_dict({"prompt": f"{EMBER_ORANGE} bold"}),
     )
 
