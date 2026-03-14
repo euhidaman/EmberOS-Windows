@@ -173,6 +173,64 @@ def _find_free_port(host: str, start_port: int) -> int:
     return start_port
 
 
+def _evict_port(host: str, port: int) -> None:
+    """Kill any process already bound to host:port so we always own our port."""
+    import socket, time
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        occupied = sock.connect_ex((host, port)) == 0
+    finally:
+        sock.close()
+
+    if not occupied:
+        return
+
+    killed = False
+    try:
+        import psutil
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.laddr and conn.laddr.port == port and conn.pid:
+                try:
+                    proc = psutil.Process(conn.pid)
+                    logger.info("Evicting stale service PID %d on port %d", conn.pid, port)
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                    killed = True
+                except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                    try:
+                        proc.kill()
+                        killed = True
+                    except Exception:
+                        pass
+                except psutil.AccessDenied:
+                    # Fall through to taskkill below
+                    pass
+    except ImportError:
+        pass
+
+    if not killed:
+        # Fallback: netstat + taskkill (always available on Windows)
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.splitlines():
+                if f":{port} " in line and "LISTENING" in line:
+                    pid = line.split()[-1]
+                    if pid.isdigit():
+                        subprocess.run(
+                            ["taskkill", "/PID", pid, "/F"],
+                            capture_output=True, timeout=5,
+                        )
+                        logger.info("Killed stale service PID %s on port %d via taskkill", pid, port)
+                    break
+        except Exception as e:
+            logger.warning("Could not evict process on port %d: %s", port, e)
+
+    time.sleep(0.5)  # give the OS a moment to release the port
+
+
 def run_standalone(api_port: int = 0):
     """Run the agent + API server directly (not as a Windows Service)."""
     from emberos.agent import EmberAgent
@@ -185,6 +243,7 @@ def run_standalone(api_port: int = 0):
     agent = EmberAgent(config)
     agent.start()
 
+    _evict_port(config.server_host, config.agent_api_port)
     actual_port = _find_free_port(config.server_host, config.agent_api_port)
     AgentAPIHandler.agent = agent
 
@@ -245,6 +304,7 @@ try:
                 self._agent = EmberAgent(config)
                 self._agent.start()
 
+                _evict_port(config.server_host, config.agent_api_port)
                 actual_port = _find_free_port(config.server_host, config.agent_api_port)
                 AgentAPIHandler.agent = self._agent
                 self._httpd = HTTPServer((config.server_host, actual_port), AgentAPIHandler)

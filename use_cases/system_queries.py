@@ -229,14 +229,6 @@ def mute_volume() -> str:
 def set_volume(level: int) -> str:
     """Set system volume 0–100 via PowerShell."""
     level = max(0, min(100, int(level)))
-    script = (
-        f"$obj = New-Object -ComObject WScript.Shell; "
-        f"$master = [System.Runtime.InteropServices.Marshal]::GetActiveObject('WScript.Shell'); "
-        f"Add-Type -AssemblyName System.Windows.Forms; "
-        f"$vol = [System.Math]::Round({level} / 2); "
-        f"For ($i=0; $i -lt 50; $i++) {{ [System.Windows.Forms.SendKeys]::SendWait([char]174) }}; "
-        f"For ($i=0; $i -lt $vol; $i++) {{ [System.Windows.Forms.SendKeys]::SendWait([char]175) }}"
-    )
     # Simpler: use nircmd if available, else send volume keys
     try:
         result = subprocess.run(

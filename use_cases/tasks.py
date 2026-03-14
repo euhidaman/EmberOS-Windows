@@ -106,6 +106,12 @@ class TaskManager:
             self._conn.commit()
             return cur.rowcount
 
+    def clear_all(self) -> int:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM tasks")
+            self._conn.commit()
+            return cur.rowcount
+
     def count_pending(self) -> int:
         with self._lock:
             return self._conn.execute(

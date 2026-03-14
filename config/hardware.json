@@ -9,6 +9,6 @@
     "gpu_mode":  "cuda",
     "cuda_version":  "12.6",
     "quant_type":  "i2_s",
-    "gpu_layers":  99,
+    "gpu_layers":  0,
     "bitnet_binary":  "bitnet/llama-server.exe"
 }

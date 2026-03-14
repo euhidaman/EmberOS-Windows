@@ -220,6 +220,223 @@ def organize_folder_by_type(folder: str, preview_only: bool = True,
     return {"moved": moved, "total_moved": sum(moved.values())}
 
 
+# ---------------------------------------------------------------------------
+# Smart content-aware organization
+# ---------------------------------------------------------------------------
+
+_IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".svg",
+}
+
+_DOC_EXTENSIONS = {
+    ".pdf", ".docx", ".doc", ".txt", ".md", ".rtf", ".odt",
+    ".csv", ".xls", ".xlsx", ".pptx", ".ppt",
+}
+
+
+def _group_images_by_filename(image_files: list) -> dict:
+    """Group image Path objects by common meaningful words in their filenames."""
+    import re
+
+    def _tokens(stem: str) -> list:
+        # Strip date patterns and pure numbers, then split on separators
+        s = re.sub(r'\b\d{4}[\-_]?\d{2}[\-_]?\d{2}\b', '', stem)
+        s = re.sub(r'\b\d+\b', '', s)
+        return [t.lower() for t in re.split(r'[\s\-_]+', s) if len(t) >= 3]
+
+    file_tokens = {f: _tokens(f.stem) for f in image_files}
+
+    # Count how many files each token appears in
+    token_count: dict = {}
+    for tokens in file_tokens.values():
+        for t in set(tokens):
+            token_count[t] = token_count.get(t, 0) + 1
+
+    # Best tokens first (most files matched, then alphabetical for stability)
+    ranked = sorted(
+        [(t, c) for t, c in token_count.items() if c >= 2],
+        key=lambda x: (-x[1], x[0]),
+    )
+
+    groups: dict = {}
+    assigned: set = set()
+
+    for token, _ in ranked:
+        eligible = [f for f in image_files if f not in assigned and token in file_tokens[f]]
+        if eligible:
+            groups[token.title()] = eligible
+            assigned.update(eligible)
+
+    remaining = [f for f in image_files if f not in assigned]
+    if remaining:
+        groups.setdefault("Images", []).extend(remaining)
+
+    return groups
+
+
+def _group_docs_by_llm(doc_files: list, llm_client) -> dict | None:
+    """Ask the LLM to cluster documents by content. Returns {folder: [Path]} or None."""
+    from use_cases.file_analysis import _read_full
+
+    lines = []
+    for f in doc_files[:25]:   # cap to keep prompt small
+        try:
+            raw = _read_full(f, max_chars=500)
+            excerpt = " ".join((raw or "").split())[:250]
+        except Exception:
+            excerpt = ""
+        lines.append(f"- {f.name}: {excerpt}")
+
+    prompt = (
+        "Group the files below into 2-6 thematic folders based on their content.\n"
+        "Reply with ONLY lines in this exact format (no JSON, no explanation):\n"
+        "FolderName: file1.pdf, file2.txt\n\n"
+        + "\n".join(lines)
+    )
+
+    try:
+        response = llm_client.chat(
+            [
+                {"role": "system",
+                 "content": "You organise files into folders. Reply only with folder lines."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=300,
+        )
+    except Exception:
+        return None
+
+    # Parse "FolderName: file1.pdf, file2.txt" lines
+    groups_raw: dict = {}
+    for line in response.strip().splitlines():
+        if ":" not in line:
+            continue
+        folder_part, files_part = line.split(":", 1)
+        folder_name = folder_part.strip().strip(" -\"'").title()
+        if not folder_name:
+            continue
+        names = [n.strip().strip("\"'") for n in files_part.split(",") if n.strip()]
+        if names:
+            groups_raw.setdefault(folder_name, []).extend(names)
+
+    if not groups_raw:
+        return None
+
+    # Resolve LLM-returned names back to actual Path objects (case-insensitive)
+    lookup = {f.name.lower(): f for f in doc_files}
+    groups: dict = {}
+    assigned: set = set()
+
+    for folder_name, names in groups_raw.items():
+        resolved = []
+        for name in names:
+            match = lookup.get(name.lower())
+            if match and match not in assigned:
+                resolved.append(match)
+                assigned.add(match)
+        if resolved:
+            groups[folder_name] = resolved
+
+    # Files the LLM missed → generic fallback folder
+    missed = [f for f in doc_files if f not in assigned]
+    if missed:
+        groups.setdefault("Documents", []).extend(missed)
+
+    return groups or None
+
+
+def smart_organize_folder(folder: str, llm_client=None,
+                           preview_only: bool = True,
+                           snapshot_mgr=None) -> dict:
+    """Organize a folder by grouping similar content together.
+
+    Documents (PDF, DOCX, TXT, etc.) are clustered by LLM content analysis.
+    Images are grouped by common words in their filenames.
+    Other file types fall back to extension-based categories.
+
+    Returns (preview_only=True):
+        {"groups": {folder_name: [file_names]}, "total_files": int}
+    Returns (preview_only=False):
+        {"moved": {folder_name: count}, "total_moved": int}
+    On error:
+        {"error": str}
+    """
+    root = Path(folder)
+    if not root.exists() or not root.is_dir():
+        return {"error": f"Not a directory: {folder}"}
+
+    doc_files, image_files, other_files = [], [], []
+
+    for f in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not f.is_file():
+            continue
+        ext = f.suffix.lower()
+        if ext in _IMAGE_EXTENSIONS:
+            image_files.append(f)
+        elif ext in _DOC_EXTENSIONS | _TEXT_EXTENSIONS:
+            doc_files.append(f)
+        else:
+            other_files.append(f)
+
+    if not doc_files and not image_files and not other_files:
+        return {"error": "No files found in the folder."}
+
+    groups: dict = {}   # folder_name -> [Path]
+
+    # 1. Documents — LLM content clustering with type-based fallback
+    if doc_files:
+        doc_groups = _group_docs_by_llm(doc_files, llm_client) if llm_client else None
+        if doc_groups:
+            for name, files in doc_groups.items():
+                groups.setdefault(name, []).extend(files)
+        else:
+            for f in doc_files:
+                ext = f.suffix.lower()
+                cat = ("PDFs" if ext == ".pdf"
+                       else "Spreadsheets" if ext in {".xls", ".xlsx", ".csv"}
+                       else "Documents")
+                groups.setdefault(cat, []).append(f)
+
+    # 2. Images — filename token grouping
+    if image_files:
+        for name, files in _group_images_by_filename(image_files).items():
+            groups.setdefault(name, []).extend(files)
+
+    # 3. Other — extension categories
+    for f in other_files:
+        ext = f.suffix.lower()
+        cat = "Other"
+        for c, exts in _FILE_CATEGORIES.items():
+            if ext in exts:
+                cat = c
+                break
+        groups.setdefault(cat, []).append(f)
+
+    if preview_only:
+        return {
+            "groups": {name: [f.name for f in files] for name, files in groups.items()},
+            "total_files": sum(len(v) for v in groups.values()),
+        }
+
+    # Execute moves
+    moved: dict = {}
+    for folder_name, files in groups.items():
+        target = root / folder_name
+        target.mkdir(exist_ok=True)
+        count = 0
+        for f in files:
+            dst = target / f.name
+            if dst.exists():
+                dst = target / f"{f.stem}_1{f.suffix}"
+            if snapshot_mgr:
+                snapshot_mgr.snapshot_file(str(f), "smart_organize")
+            shutil.move(str(f), str(dst))
+            count += 1
+        moved[folder_name] = count
+
+    return {"moved": moved, "total_moved": sum(moved.values())}
+
+
 def list_directory(path: str) -> list[dict]:
     root = Path(path)
     if not root.exists():

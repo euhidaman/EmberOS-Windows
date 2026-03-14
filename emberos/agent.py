@@ -71,6 +71,16 @@ _FILE_ORGANIZE_KEYWORDS = (
     "organize files by type",
 )
 
+_SMART_ORGANIZE_KEYWORDS = (
+    "organize by content", "organise by content",
+    "group by content", "group similar files", "group similar documents",
+    "organize similar", "organise similar",
+    "smart organize", "smart organise",
+    "group by topic", "organize by topic",
+    "group related files", "organize related files",
+    "sort by content", "cluster files",
+)
+
 _FILE_SUMMARIZE_KEYWORDS = (
     "what's in", "whats in", "what is in", "what's inside",
     "summarize", "summarise", "summary of",
@@ -123,7 +133,9 @@ _TASK_ADD_KEYWORDS = ("add a task", "add task", "create a task", "create task",
                         "remind me to", "i need to", "task:")
 _TASK_LIST_KEYWORDS = ("show my tasks", "list my tasks", "show tasks", "list tasks",
                          "what are my tasks", "pending tasks", "my to-do", "my todo",
-                         "task list", "show todo")
+                         "task list", "show todo", "what tasks", "tasks do i have",
+                         "tasks for today", "tasks today", "my tasks today",
+                         "any tasks", "open tasks", "remaining tasks", "tasks left")
 _TASK_COMPLETE_KEYWORDS = ("complete task", "mark task", "done task", "finish task",
                              "mark as done", "complete #", "done #", "task done")
 _TASK_REMOVE_KEYWORDS = ("remove task", "delete task", "delete to-do", "remove todo")
@@ -175,6 +187,13 @@ _LIST_DIR_KEYWORDS = (
     "what's in the folder", "show me the files in", "list directory",
     "show the contents of", "what is in the folder", "files in the",
     "what documents are in", "show folder contents",
+    # broader natural phrasings
+    "what are the files in", "what are the files on",
+    "files in my", "files on my", "files in",
+    "what's in my", "what is in my",
+    "what's inside", "what is inside",
+    "show me what's in", "show me what is in",
+    "what do i have in",
 )
 
 _FOLDER_READ_KEYWORDS = (
@@ -420,6 +439,9 @@ class EmberAgent:
             "last_output_path": None,
         }
 
+        # Handler map for LLM-based routing — populated lazily on first use
+        self._tool_handler_map: dict = {}
+
         self._server_started = False
 
     @staticmethod
@@ -548,6 +570,21 @@ class EmberAgent:
                 moved = result.get("moved", {})
                 lines = [f"\u2713 Moved {count} {cat}" for cat, count in moved.items()]
                 return "Done!\n" + "\n".join(lines)
+            elif act == "smart_organize":
+                from use_cases.file_ops import smart_organize_folder
+                result = smart_organize_folder(
+                    params["folder"],
+                    llm_client=self.llm,
+                    preview_only=False,
+                    snapshot_mgr=self.snapshot_mgr,
+                )
+                if "error" in result:
+                    return result["error"]
+                moved = result.get("moved", {})
+                lines = [f"Done! Moved {result.get('total_moved', 0)} file(s):"]
+                for group_name, count in moved.items():
+                    lines.append(f"  {group_name}/  \u2190  {count} file(s)")
+                return "\n".join(lines)
             elif act == "delete_file":
                 from use_cases.file_ops import delete_file
                 return delete_file(params["path"], snapshot_mgr=self.snapshot_mgr)
@@ -589,6 +626,117 @@ class EmberAgent:
 
     # ── Intent Detection / Routing ───────────────────────────────
 
+    def _build_handler_map(self) -> dict:
+        """Return a mapping from router tool names to callable handlers.
+
+        All callables accept a single positional argument: the raw user_input string.
+        Built lazily so __init__ stays clean and method references resolve correctly.
+        """
+        from use_cases.system_queries import (
+            get_battery_status, lock_screen, sleep_system,
+            get_open_windows, minimize_all_windows,
+        )
+        return {
+            # --- File / folder ---
+            "list_dir":           self._handle_list_dir,
+            "file_summarize":     self._handle_file_summarize,
+            "folder_summarize":   self._handle_folder_docs_request,
+            "folder_explain":     self._handle_folder_explain,
+            "grep_folder":        self._handle_content_search,
+            "grep_file":          self._handle_grep,
+            "batch_delete":       self._handle_batch_delete,
+            "file_delete":        self._handle_file_delete,
+            "create_doc":         self._handle_create_doc,
+            "multi_doc_compare":  self._handle_multi_doc_compare,
+            "folder_topics":      self._handle_folder_topics,
+            "doc_qa":             self._handle_doc_qa,
+            "diff_files":         self._handle_diff,
+            "extract_patterns":   self._handle_extract_patterns,
+            "compress":           self._handle_compress,
+            "extract":            self._handle_extract,
+            "find_large_files":   self._handle_find_large_files,
+            "find_old_files":     self._handle_find_old_files,
+            "find_duplicates":    self._handle_find_duplicates,
+            "smart_organize":     self._handle_smart_organize,
+            # --- Tasks ---
+            "list_tasks":         self._handle_task_list,
+            "add_task":           self._handle_task_add,
+            "complete_task":      self._handle_task_complete,
+            "remove_task":        self._handle_task_remove,
+            "clear_tasks":        lambda q: self._handle_task_clear(q),
+            # --- System controls ---
+            "screenshot":         self._handle_screenshot,
+            "volume_up":          lambda q: self._handle_volume("up", q),
+            "volume_down":        lambda q: self._handle_volume("down", q),
+            "mute":               lambda q: self._handle_mute(),
+            "dark_mode":          self._handle_dark_mode,
+            "brightness_up":      self._handle_brightness,
+            "brightness_down":    self._handle_brightness,
+            "battery":            lambda q: get_battery_status(),
+            "lock":               lambda q: lock_screen(),
+            "sleep":              lambda q: sleep_system(),
+            "shutdown":           lambda q: self._handle_power("shutdown", q),
+            "restart":            lambda q: self._handle_power("restart", q),
+            "window_list":        lambda q: get_open_windows(),
+            "window_minimize":    lambda q: minimize_all_windows(),
+            "window_focus":       self._handle_window_focus,
+            # --- Web / notes ---
+            "web_search":         self._handle_web_search,
+            "note_save":          self._handle_note_save,
+            "note_query":         self._handle_note_query,
+        }
+
+    def _route_via_manifest(self, user_input: str) -> Optional[str]:
+        """Route user input by asking the LLM to match it against the tool manifest.
+
+        Returns the handler's response string, or None if routing failed
+        (unknown tool name, handler returned None, or LLM unavailable).
+        For chained tools the handlers are called in sequence; context (_ctx)
+        flows naturally between them since each handler reads/writes self._ctx.
+        """
+        if not self.llm:
+            return None
+
+        from emberos.router import route
+        result = route(user_input, self.llm)
+        tool  = result.get("tool")
+        chain = result.get("chain")
+
+        if not tool:
+            return None
+
+        if not self._tool_handler_map:
+            self._tool_handler_map = self._build_handler_map()
+
+        if chain and len(chain) > 1:
+            # Multi-step: run each handler in order and collect outputs
+            outputs = []
+            for step in chain:
+                handler = self._tool_handler_map.get(step)
+                if not handler:
+                    continue
+                try:
+                    step_result = handler(user_input)
+                except Exception as e:
+                    logger.warning("Chain step '%s' raised: %s", step, e)
+                    step_result = None
+                if step_result:
+                    outputs.append(str(step_result))
+                # Stop if a confirmation prompt is waiting (e.g. batch_delete)
+                if self.pending_confirmation:
+                    break
+            return "\n\n".join(outputs) if outputs else None
+
+        handler = self._tool_handler_map.get(tool)
+        if not handler:
+            return None
+
+        try:
+            return handler(user_input)
+        except Exception as e:
+            logger.warning("Manifest-routed handler '%s' raised: %s", tool, e)
+            return None
+
     def _route_special_intents(self, user_input: str) -> Optional[str]:
         """Check for special intents and handle them directly. Returns response or None."""
         lower = user_input.lower().strip()
@@ -628,12 +776,42 @@ class EmberAgent:
         if file_find is not None:
             return file_find
 
+        # Directory listing — direct Python, no LLM needed
+        if any(kw in lower for kw in _LIST_DIR_KEYWORDS):
+            return self._handle_list_dir(user_input)
+
+        # Task management — SQLite only, no LLM needed
+        if any(kw in lower for kw in _TASK_ADD_KEYWORDS):
+            return self._handle_task_add(user_input)
+        if any(kw in lower for kw in _TASK_LIST_KEYWORDS):
+            return self._handle_task_list(user_input)
+        if any(kw in lower for kw in _TASK_COMPLETE_KEYWORDS):
+            return self._handle_task_complete(user_input)
+        if any(kw in lower for kw in _TASK_REMOVE_KEYWORDS):
+            return self._handle_task_remove(user_input)
+        if any(kw in lower for kw in _TASK_CLEAR_KEYWORDS):
+            return self._handle_task_clear(user_input)
+        if lower.endswith(("task", "tasks", "todo", "to-do")):
+            first = lower.split()[0] if lower.split() else ""
+            if first in ("clear", "remove", "delete", "erase", "drop"):
+                return self._handle_task_remove(user_input)
+            if first in ("complete", "done", "finish", "mark", "finished", "close"):
+                return self._handle_task_complete(user_input)
+
         # Folder organization with confirmation
         file_org = self._handle_file_organize(user_input)
         if file_org is not None:
             return file_org
 
-        # "what is in my ResearchPapers folder" → directory listing, not file summarize
+        # ── LLM-based routing (primary path) ─────────────────────────────────
+        # The LLM reads a compact tool manifest and picks the right handler.
+        # This replaces the need to keep growing the keyword lists below.
+        # If the LLM is unavailable, execution falls through to keyword fallback.
+        manifest_result = self._route_via_manifest(user_input)
+        if manifest_result is not None:
+            return manifest_result
+
+        # ── Keyword fallback (when LLM is unavailable) ────────────────────────
         if "folder" in lower and any(kw in lower for kw in _FILE_SUMMARIZE_KEYWORDS):
             return self._handle_list_dir(user_input)
 
@@ -642,6 +820,10 @@ class EmberAgent:
             result = self._handle_file_summarize(user_input)
             if result is not None:
                 return result
+
+        # Smart content-aware organization
+        if any(kw in lower for kw in _SMART_ORGANIZE_KEYWORDS):
+            return self._handle_smart_organize(user_input)
 
         # Batch delete from context ("delete those files", "remove all of them")
         if any(kw in lower for kw in _BATCH_DELETE_KEYWORDS):
@@ -714,18 +896,6 @@ class EmberAgent:
             return minimize_all_windows()
         if any(kw in lower for kw in _WINDOW_FOCUS_KEYWORDS):
             return self._handle_window_focus(user_input)
-
-        # Task management
-        if any(kw in lower for kw in _TASK_ADD_KEYWORDS):
-            return self._handle_task_add(user_input)
-        if any(kw in lower for kw in _TASK_LIST_KEYWORDS):
-            return self._handle_task_list(user_input)
-        if any(kw in lower for kw in _TASK_COMPLETE_KEYWORDS):
-            return self._handle_task_complete(user_input)
-        if any(kw in lower for kw in _TASK_REMOVE_KEYWORDS):
-            return self._handle_task_remove(user_input)
-        if any(kw in lower for kw in _TASK_CLEAR_KEYWORDS):
-            return self._handle_task_clear()
 
         # Archive operations
         if any(kw in lower for kw in _COMPRESS_KEYWORDS):
@@ -898,6 +1068,7 @@ class EmberAgent:
 
         self.pending_confirmation = {
             "action": "batch_delete",
+            "description": f"delete {len(existing)} file(s)",
             "params": {"paths": existing},
             "preview": preview,
         }
@@ -1287,6 +1458,51 @@ class EmberAgent:
         }
         return "\n".join(lines)
 
+    def _handle_smart_organize(self, user_input: str) -> str:
+        """Organize a folder by content similarity (LLM clusters docs; images by filename)."""
+        import os
+        from pathlib import Path
+
+        folder = self._resolve_folder_from_text(user_input.lower(), user_input)
+        if not folder:
+            folder = self._ctx.get("last_dir")
+        if not folder or not os.path.isdir(folder):
+            return (
+                "Please specify a folder, e.g. "
+                "'organize my Invoices folder by content' or "
+                "'group similar files in Downloads'"
+            )
+
+        from use_cases.file_ops import smart_organize_folder
+        result = smart_organize_folder(folder, llm_client=self.llm, preview_only=True)
+
+        if "error" in result:
+            return result["error"]
+
+        groups = result.get("groups", {})
+        total = result.get("total_files", 0)
+
+        if total == 0:
+            return f"No files to organize in {Path(folder).name}."
+
+        lines = [
+            f"Smart organization preview for {Path(folder).name} ({total} file(s)):\n"
+        ]
+        for group_name, files in groups.items():
+            lines.append(f"  [{group_name}/]  — {len(files)} file(s)")
+            for fname in files[:4]:
+                lines.append(f"      • {fname}")
+            if len(files) > 4:
+                lines.append(f"      ... and {len(files) - 4} more")
+        lines.append("\nType 'yes' to proceed, or 'no' to cancel.")
+
+        self.pending_confirmation = {
+            "action": "smart_organize",
+            "params": {"folder": folder},
+            "description": f"Smart organize: {folder}",
+        }
+        return "\n".join(lines)
+
     # ── New capability handlers ──────────────────────────────────
 
     def _handle_screenshot(self, user_input: str) -> str:
@@ -1440,25 +1656,66 @@ class EmberAgent:
 
     def _handle_task_complete(self, user_input: str) -> str:
         import re as _re
+        # Try by ID first
         m = _re.search(r'#?(\d+)', user_input)
-        if not m:
-            return "Please specify the task ID, e.g. 'complete task #3'"
-        task_id = int(m.group(1))
-        task = self._task_mgr.complete(task_id)
-        if task is None:
-            return f"Task #{task_id} not found or already completed."
-        return f"Task #{task_id} marked as done: {task['title']}"
+        if m:
+            task_id = int(m.group(1))
+            task = self._task_mgr.complete(task_id)
+            if task is None:
+                return f"Task #{task_id} not found or already completed."
+            return f"Task #{task_id} marked as done: {task['title']}"
+        # Extract title: strip leading action words + trailing "task(s)"
+        title = _re.sub(
+            r'^(?:complete|done|finish|mark|finished|close|done with|mark as done)\s+',
+            '', user_input.strip(), flags=_re.IGNORECASE,
+        )
+        title = _re.sub(r'\s+tasks?\s*$', '', title, flags=_re.IGNORECASE).strip()
+        if not title:
+            return "Please specify a task ID or name, e.g. 'complete task #3' or 'done review invoice task'"
+        matches = self._task_mgr.search(title)
+        pending = [t for t in matches if not t["completed"]]
+        if not pending:
+            return f"No pending task found matching '{title}'."
+        if len(pending) == 1:
+            task = self._task_mgr.complete(pending[0]["id"])
+            return f"Marked as done: {pending[0]['title']}"
+        lines = [f"Multiple tasks match '{title}'. Specify by ID:"]
+        for t in pending[:5]:
+            lines.append(f"  #{t['id']} {t['title']}")
+        return "\n".join(lines)
 
     def _handle_task_remove(self, user_input: str) -> str:
         import re as _re
+        # Try by ID first
         m = _re.search(r'#?(\d+)', user_input)
-        if not m:
-            return "Please specify the task ID, e.g. 'remove task #2'"
-        task_id = int(m.group(1))
-        removed = self._task_mgr.remove(task_id)
-        return f"Task #{task_id} deleted." if removed else f"Task #{task_id} not found."
+        if m:
+            task_id = int(m.group(1))
+            removed = self._task_mgr.remove(task_id)
+            return f"Task #{task_id} deleted." if removed else f"Task #{task_id} not found."
+        # Extract title: strip leading action words + trailing "task(s)"
+        title = _re.sub(
+            r'^(?:clear|remove|delete|erase|drop)\s+',
+            '', user_input.strip(), flags=_re.IGNORECASE,
+        )
+        title = _re.sub(r'\s+tasks?\s*$', '', title, flags=_re.IGNORECASE).strip()
+        if not title:
+            return "Please specify a task ID or name, e.g. 'remove task #2' or 'clear review invoice task'"
+        matches = self._task_mgr.search(title)
+        if not matches:
+            return f"No task found matching '{title}'."
+        if len(matches) == 1:
+            removed = self._task_mgr.remove(matches[0]["id"])
+            return f"Removed: {matches[0]['title']}" if removed else "Could not remove task."
+        lines = [f"Multiple tasks match '{title}'. Specify by ID:"]
+        for t in matches[:5]:
+            lines.append(f"  #{t['id']} {t['title']}")
+        return "\n".join(lines)
 
-    def _handle_task_clear(self) -> str:
+    def _handle_task_clear(self, user_input: str = "") -> str:
+        lower = user_input.lower()
+        if any(w in lower for w in ("all", "everything", "every task", "entire")):
+            count = self._task_mgr.clear_all()
+            return f"Cleared all {count} task(s)."
         count = self._task_mgr.clear_completed()
         return f"Cleared {count} completed task(s)."
 
@@ -1754,7 +2011,7 @@ class EmberAgent:
         lower = user_input.lower()
         types = []
         for pt in ("email", "url", "phone", "date", "ipv4"):
-            if pt in lower or (pt == "ip" and "ip" in lower):
+            if pt in lower or (pt == "ipv4" and "ip" in lower):
                 types.append(pt)
         result = extract_patterns(resolved, types or None)
         summary = result.pop("_summary", "")
@@ -1771,9 +2028,21 @@ class EmberAgent:
 
     def _resolve_folder_from_text(self, text_lower: str,
                                    original: str = "") -> Optional[str]:
-        """Resolve a folder path from natural language, with context fallback."""
+        """Resolve a folder path from natural language, with context fallback.
+
+        Resolution priority:
+          1. Explicit subfolder + base  ("X folder in Downloads", with or without my/the)
+          2. Implicit subfolder + base  ("X in Downloads" — no 'folder' keyword)
+          3. Context shortcut           (last_dir basename re-mentioned)
+          4. Fuzzy directory scan       (capitalized names scanned against actual dirs)
+          5. Standard base folder       (just "Downloads", "Documents", etc.)
+          6. Absolute path in query
+          7. Last-used directory
+        """
         import os
         import re as _re
+        from pathlib import Path as _P
+
         home = os.path.expanduser("~")
         _KNOWN = [
             ("downloads",  os.path.join(home, "Downloads")),
@@ -1786,45 +2055,125 @@ class EmberAgent:
         _KNOWN_MAP = dict(_KNOWN)
         _bases = [path for _, path in _KNOWN]
 
-        # 1. Context: if last_dir's folder name appears in the query, return it first
+        # Common words that are NOT folder names even if they appear before "in <base>"
+        _STOP = frozenset({
+            "files", "file", "what", "list", "show", "all", "the", "my", "some",
+            "any", "stuff", "things", "items", "content", "contents", "everything",
+            "folder", "directory", "look", "see", "get", "find", "search",
+        })
+
+        def _scan(name: str, base_path: str) -> Optional[str]:
+            """Case-insensitive subfolder lookup inside base_path."""
+            try:
+                for entry in os.listdir(base_path):
+                    if entry.lower() == name.lower() and os.path.isdir(
+                        os.path.join(base_path, entry)
+                    ):
+                        return os.path.join(base_path, entry)
+            except OSError:
+                pass
+            return None
+
+        def _scan_all(name: str) -> Optional[str]:
+            for bp in _bases:
+                found = _scan(name, bp)
+                if found:
+                    return found
+            return None
+
+        _BASE_PAT = r"(downloads|documents|desktop|pictures|videos|music)"
+
+        # 1a. "the/my X folder [,] in [the/my] Y"  — hyphens OK, no spaces in name
+        #     (spaces excluded to avoid matching across "the files in the demo-files folder")
+        m = _re.search(
+            r'\b(?:my|the)\s+([\w][\w\-]*)\s+folder\s*,?\s*'
+            r'(?:in|inside)\s+(?:the\s+|my\s+)?' + _BASE_PAT,
+            text_lower,
+        )
+        if m:
+            sub, bp = m.group(1).strip(), _KNOWN_MAP.get(m.group(2))
+            if bp:
+                return _scan(sub, bp) or os.path.join(bp, sub)
+
+        # 1b. Multi-word title-case: "Research Papers folder in Downloads"
+        #     Uses IGNORECASE for the base keyword but validates title-case on the name.
+        m = _re.search(
+            r'\b([A-Za-z][A-Za-z\-]+(?:\s+[A-Za-z][A-Za-z\-]+)+)\s+folder\s*,?\s*'
+            r'(?:in|inside)\s+(?:the\s+|my\s+)?'
+            r'(downloads|documents|desktop|pictures|videos|music)',
+            original,
+            _re.IGNORECASE,
+        )
+        if m:
+            sub = m.group(1).strip()
+            if all(w[0].isupper() for w in sub.split()):  # every word must be capitalised
+                bp = _KNOWN_MAP.get(m.group(2).lower())
+                if bp:
+                    return _scan(sub, bp) or os.path.join(bp, sub)
+
+        # 1c. "X folder in Y"  — no my/the required, single/hyphenated name only
+        #     Disk-only: only returns if the subfolder actually exists (avoids false positives)
+        m = _re.search(
+            r'\b([\w][\w\-]+)\s+folder\s*,?\s*'
+            r'(?:in|inside)\s+(?:the\s+|my\s+)?' + _BASE_PAT,
+            text_lower,
+        )
+        if m:
+            sub, bp = m.group(1).strip(), _KNOWN_MAP.get(m.group(2))
+            if sub not in _STOP and bp:
+                found = _scan(sub, bp)
+                if found:
+                    return found
+
+        # 2. "X in Y"  — no 'folder' keyword; sub must exist on disk (avoids false positives)
+        m = _re.search(
+            r'\b([\w][\w \-]+?)\s+(?:in|inside)\s+(?:the\s+|my\s+)?' + _BASE_PAT,
+            text_lower,
+        )
+        if m:
+            sub, bp = m.group(1).strip(), _KNOWN_MAP.get(m.group(2))
+            if sub not in _STOP and bp and len(sub) > 2:
+                found = _scan(sub, bp)
+                if found:
+                    return found
+
+        # 3. Context shortcut: last_dir basename re-mentioned in query
         last = self._ctx.get("last_dir")
         if last:
-            from pathlib import Path as _P
             basename = _P(last).name.lower()
             if basename and len(basename) > 3 and basename in text_lower:
                 return last
 
-        # 2. Subfolder pattern: "my/the ResearchPapers folder in Documents"
-        m = _re.search(
-            r'\b(?:my|the)\s+([\w][\w ]*?)\s+folder\s+(?:in|inside)\s+(?:the\s+|my\s+)?'
-            r'(downloads|documents|desktop|pictures|videos|music)',
-            text_lower,
+        # 4. Fuzzy directory scan — find any word/phrase in the query that
+        #    matches an actual subdirectory name across all known base paths.
+        #    Handles: quoted names, hyphenated names, multi-word CamelCase phrases.
+        candidates: list[str] = []
+
+        # Quoted strings have highest confidence
+        candidates += [g1 or g2 for g1, g2 in _re.findall(r'"([^"]+)"|\'([^\']+)\'', original)]
+
+        # Hyphenated tokens like "Demo-files", "research-data"
+        candidates += _re.findall(r'\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b', original)
+
+        # Multi-word title-case phrases: "Research Papers", "My Projects"
+        candidates += _re.findall(
+            r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', original
         )
-        if m:
-            sub_name = m.group(1).strip()
-            base_path = _KNOWN_MAP.get(m.group(2))
-            if base_path:
-                try:
-                    for entry in os.listdir(base_path):
-                        if entry.lower() == sub_name.lower():
-                            return os.path.join(base_path, entry)
-                except OSError:
-                    pass
-                return os.path.join(base_path, sub_name)
 
-        # 3. "in FolderName" where FolderName starts uppercase — search known base paths
-        in_m = _re.search(r'\bin\s+([A-Z][A-Za-z0-9_\-]+)\b', original)
-        if in_m:
-            folder_name = in_m.group(1)
-            for base_path in _bases:
-                try:
-                    for entry in os.listdir(base_path):
-                        if entry.lower() == folder_name.lower():
-                            return os.path.join(base_path, entry)
-                except OSError:
-                    pass
+        # Single CamelCase / Title-case word: "Downloads", "Projects"
+        candidates += _re.findall(r'\b([A-Z][A-Za-z0-9]{2,})\b', original)
 
-        # 4. Standard base folder match — skip "documents" used as a generic noun
+        seen: set[str] = set()
+        for name in candidates:
+            name = name.strip()
+            if not name or name.lower() in seen or name.lower() in _STOP:
+                continue
+            seen.add(name.lower())
+            found = _scan_all(name)
+            if found:
+                return found
+
+        # 5. Standard base folder match
         for kw, path in _KNOWN:
             if not _re.search(rf'\b{kw}\b', text_lower):
                 continue
@@ -1834,14 +2183,14 @@ class EmberAgent:
                 continue
             return path
 
-        # 5. Absolute path in original text
+        # 6. Absolute path in original text
         abs_m = _re.search(r'[A-Za-z]:\\[\w\\/ \-\.]+', original)
         if abs_m:
             candidate = abs_m.group().rstrip()
-            from pathlib import Path as _P
             if _P(candidate).exists():
                 return candidate
 
+        # 7. Context fallback
         return self._ctx.get("last_dir")
 
     def _format_folder_docs(self, result: dict,

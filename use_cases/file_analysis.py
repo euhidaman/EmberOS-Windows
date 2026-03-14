@@ -236,12 +236,16 @@ def _read_pdf_full(path: Path, max_chars: int = 25_000) -> str:
     try:
         import pdfplumber
         with pdfplumber.open(path) as pdf:
+            page_count = len(pdf.pages)
             text = ""
             for page in pdf.pages:
                 extracted = page.extract_text()
                 if extracted:
                     text += extracted + "\n"
             text = text.strip()
+            if not text and page_count > 0:
+                plural = "s" if page_count != 1 else ""
+                return f"[Image PDF: {page_count} page{plural} — scanned document, no extractable text]"
             return text[:max_chars] if len(text) > max_chars else text
     except ImportError:
         return "PDF extraction requires pdfplumber"
@@ -299,6 +303,93 @@ def _sample_for_llm(content: str, budget: int = 3_400) -> tuple[str, bool]:
     return sampled, True
 
 
+_CHUNK_SIZE    = 10_000   # chars per chunk (~2 500 tokens)
+_CHUNK_OVERLAP = 400      # overlap to avoid cutting mid-sentence
+_CHUNK_SUMMARY_TOKENS  = 250
+_SYNTHESIS_TOKENS      = 700
+_SYNTHESIS_INPUT_CAP   = 6_000   # max chars of section summaries fed to synthesis
+
+
+def _chunked_summarize(content: str, filename: str, word_count: int,
+                       llm_client) -> str:
+    """Multi-pass summarization for long documents.
+
+    Pass 1: summarize each ~10 000-char chunk in 3-5 sentences.
+    Pass 2: synthesize all section summaries into a coherent overview.
+    Always returns a non-empty string — uses extractive fallback if LLM fails.
+    """
+    # Build non-overlapping chunks with a small overlap for continuity
+    step = _CHUNK_SIZE - _CHUNK_OVERLAP
+    chunks = [
+        content[i: i + _CHUNK_SIZE]
+        for i in range(0, len(content), step)
+        if content[i: i + _CHUNK_SIZE].strip()
+    ]
+    if not chunks:
+        return _extractive_summary(content) if content.strip() else "Document appears to be empty."
+
+    total = len(chunks)
+
+    # --- Pass 1: per-chunk section summaries ---
+    section_summaries: list[str] = []
+    for idx, chunk in enumerate(chunks):
+        try:
+            raw = llm_client.chat(
+                [
+                    {"role": "system",
+                     "content": "You are a document summarizer. Reply with a concise summary of the passage only — no preamble."},
+                    {"role": "user",
+                     "content": (
+                         f"Document: {filename}  (section {idx + 1} of {total})\n\n"
+                         f"{chunk}\n\n"
+                         "Summarize this section in 3-5 clear sentences."
+                     )},
+                ],
+                max_tokens=_CHUNK_SUMMARY_TOKENS,
+            )
+            section_summaries.append(raw.strip())
+        except Exception:
+            # Fallback: pull the first two meaningful sentences from the chunk
+            lines = [l.strip() for l in chunk.splitlines() if len(l.strip()) > 40]
+            section_summaries.append(" ".join(lines[:2]))
+
+    if not section_summaries:
+        return _extractive_summary(content)
+
+    # Single-chunk doc — the one summary is the final answer
+    if total == 1:
+        return section_summaries[0]
+
+    # --- Pass 2: synthesise section summaries into a full overview ---
+    numbered = "\n\n".join(
+        f"[Section {i + 1}] {s}" for i, s in enumerate(section_summaries)
+    )
+    if len(numbered) > _SYNTHESIS_INPUT_CAP:
+        numbered = numbered[:_SYNTHESIS_INPUT_CAP] + "\n[... truncated]"
+
+    try:
+        synthesis = llm_client.chat(
+            [
+                {"role": "system",
+                 "content": "You are a document summarizer. Write a comprehensive, well-structured summary."},
+                {"role": "user",
+                 "content": (
+                     f"The document '{filename}' (~{word_count:,} words) was split into "
+                     f"{total} sections. Section summaries:\n\n{numbered}\n\n"
+                     "Write a comprehensive overview of the full document in 500-800 words. "
+                     "Cover the main topic, methodology, key findings, and conclusions."
+                 )},
+            ],
+            max_tokens=_SYNTHESIS_TOKENS,
+        )
+        return synthesis.strip()
+    except Exception:
+        # Synthesis failed — return joined section summaries as fallback
+        return "\n\n".join(
+            f"Section {i + 1}: {s}" for i, s in enumerate(section_summaries)
+        )
+
+
 def _extractive_summary(content: str, max_sentences: int = 5) -> str:
     """Generate a simple extractive summary by selecting key sentences."""
     # Fast preprocessing: normalize whitespace and remove line breaks
@@ -338,17 +429,29 @@ def _extractive_summary(content: str, max_sentences: int = 5) -> str:
 
 
 def summarize_file(path: str, llm_client=None) -> str:
-    """Read a file at the given path and return a paragraph summary."""
+    """Read a file at the given path and return a summary.
+
+    For short documents (≤ 8 000 chars) a single LLM pass is used.
+    For longer documents the text is split into chunks, each chunk is
+    summarised separately, then a synthesis pass produces the final overview.
+    Falls back to an extractive text preview when the LLM is unavailable.
+    """
     p = Path(path)
     if not p.exists():
         return None  # caller handles "not found"
 
-    content = _read_full(p)
+    # Read more content upfront so chunked summarization has enough material
+    content = _read_full(p, max_chars=80_000)
 
     if not content:
         return f"The file {p.name} appears to be empty."
-    if content.startswith("[Binary") or content.startswith("[Image"):
-        return f"Cannot extract text from {p.name} — binary/image file."
+    if content.startswith("[Binary"):
+        return f"Cannot extract text from {p.name} — binary file."
+    if content.startswith("[Image PDF:"):
+        return (
+            f"{p.name}: {content}. "
+            "No text could be extracted — OCR software is required to read scanned documents."
+        )
     if content.startswith("Error reading PDF"):
         return f"Could not extract text from {p.name}: {content}"
     if content.startswith("Error reading"):
@@ -357,37 +460,38 @@ def summarize_file(path: str, llm_client=None) -> str:
     size = p.stat().st_size
     size_str = f"{size // 1024} KB" if size >= 1024 else f"{size} B"
     word_count = len(content.split())
+    header = f"{p.name}  ({size_str}, ~{word_count:,} words)"
 
-    # Very short — just show it
+    # Very short — just show it verbatim
     if len(content) <= 400:
         return f"{p.name} ({size_str}):\n\n{content}"
 
-    header = f"{p.name}  ({size_str}, ~{word_count:,} words)"
-
     if llm_client:
-        snippet, was_sampled = _sample_for_llm(content, budget=3_400)
-        size_note = (
-            f"Note: this is a {word_count:,}-word document. "
-            "The sample below covers the start, a middle section, and the end.\n\n"
-            if was_sampled else ""
-        )
-        prompt = (
-            f"{size_note}"
-            f"Write a concise summary paragraph of this document. "
-            f"Describe what it covers, its main points, and any notable details.\n\n"
-            f"File: {p.name}\n\n{snippet}"
-        )
         try:
-            summary = llm_client.chat([
-                {"role": "system",
-                 "content": "You are a document summarizer. Reply with one clear summary paragraph only — no preamble, no bullet points."},
-                {"role": "user", "content": prompt},
-            ])
-            return f"{header}\n\n{summary.strip()}"
+            if len(content) <= 8_000:
+                # Single pass: the whole text fits comfortably
+                summary = llm_client.chat(
+                    [
+                        {"role": "system",
+                         "content": "You are a document summarizer. Reply with one clear summary paragraph only — no preamble, no bullet points."},
+                        {"role": "user",
+                         "content": (
+                             f"Write a concise summary of this document. "
+                             f"Describe what it covers, its main points, and any notable details.\n\n"
+                             f"File: {p.name}\n\n{content}"
+                         )},
+                    ],
+                )
+            else:
+                # Multi-pass chunked summarization for large documents
+                summary = _chunked_summarize(content, p.name, word_count, llm_client)
+
+            if summary:
+                return f"{header}\n\n{summary.strip()}"
         except Exception:
             pass
 
-    # Fallback: clean text preview (no LLM needed)
+    # Fallback: clean text preview (no LLM)
     lines = [l.rstrip() for l in content.split("\n") if l.strip()]
     preview = "\n".join(lines[:20])
     return (
